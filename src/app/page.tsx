@@ -32,7 +32,7 @@ import BibleWorkspace, { BibleTabId } from '../bible/BibleWorkspace';
 import ExportImportDialog from '../ui/ExportImportDialog';
 import SnapshotHistoryPanel from '../ui/SnapshotHistoryPanel';
 import ConfirmDialog from '../ui/ConfirmDialog';
-import OutlineGrid from '../ui/OutlineGrid';
+import OutlineGrid, { OutlineSubView } from '../ui/OutlineGrid';
 import ProjectSettings from '../ui/ProjectSettings';
 import CommandPalette from '../editor/CommandPalette';
 import { WorkspaceAIConfig, loadAIConfig, saveAIConfig, DEFAULT_AI_CONFIG } from '../storage/aiConfig';
@@ -46,6 +46,7 @@ import RestoreDeletedChaptersDialog from '../ui/RestoreDeletedChaptersDialog';
 import SyncStatusBadge, { SyncToast } from '../ui/SyncStatusBadge';
 import SyncConflictModal from '../ui/SyncConflictModal';
 import CorkboardCanvas from '../ui/CorkboardCanvas';
+import { EntityCategory } from '../editor/entityMatrix';
 
 const EMPTY_CORKBOARD: Corkboard = {
   schemaVersion: 1,
@@ -170,10 +171,15 @@ export default function WorkspacePage() {
   const [beats, setBeats] = useState<Record<string, BeatData>>({});
   const [activeBeatId, setActiveBeatId] = useState<string | null>(null);
   const [corkboard, setCorkboard] = useState<Corkboard>(EMPTY_CORKBOARD);
+  const [outlineView, setOutlineView] = useState<OutlineSubView>('cards');
+  const [matrixChapterMarkdowns, setMatrixChapterMarkdowns] = useState<Record<string, string>>({});
+  const [isLoadingMatrixMarkdowns, setIsLoadingMatrixMarkdowns] = useState(false);
 
-  // Reset transcript when switching novels
+  // Reset transcript & matrix cache when switching novels
   useEffect(() => {
     setAiTranscript([]);
+    setMatrixChapterMarkdowns({});
+    setOutlineView('cards');
   }, [project?.id]);
 
   const allSeries = React.useMemo(() => {
@@ -190,6 +196,39 @@ export default function WorkspacePage() {
   const [activeTab, setActiveTab] = useState<'editor' | 'outline' | 'corkboard' | 'bible' | 'settings'>('editor');
   const [isDistractionFree, setIsDistractionFree] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+
+  // Load chapter markdown texts on demand only when Outline -> Entity Matrix is active
+  const matrixChapterOrderKey = (project?.chapterOrder || []).join('|');
+  useEffect(() => {
+    if (activeTab !== 'outline' || outlineView !== 'matrix' || !storage || !project?.id) return;
+    let cancelled = false;
+    const projId = project.id;
+    const orderIds = matrixChapterOrderKey ? matrixChapterOrderKey.split('|') : [];
+    setIsLoadingMatrixMarkdowns(true);
+
+    void (async () => {
+      try {
+        const prefix = `projects/${projId}/`;
+        const entries = await Promise.all(
+          orderIds.map(async (cid) => {
+            const md = (await storage.readFile(`${prefix}Artifacts/chapter-${cid}.md`)) || '';
+            return [cid, md] as const;
+          })
+        );
+        if (!cancelled) {
+          setMatrixChapterMarkdowns(Object.fromEntries(entries));
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingMatrixMarkdowns(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, outlineView, storage, project?.id, matrixChapterOrderKey]);
 
   // Mobile / tablet layout — see plan §7.7 (Slice 6, Mobile baseline).
   // - mobileView: on phones (<sm), 'chapters' replaces the main pane with a
@@ -2441,6 +2480,37 @@ export default function WorkspacePage() {
               onOpenHistory={(id) => {
                 handleSelectChapter(id);
                 setIsHistoryOpen(true);
+              }}
+              outlineView={outlineView}
+              onChangeOutlineView={setOutlineView}
+              characters={characters.characters}
+              locations={locations.locations}
+              items={items.items}
+              worldRules={worldRules.rules}
+              continuityList={continuityList}
+              chapterMarkdowns={matrixChapterMarkdowns}
+              isLoadingMatrixMarkdowns={isLoadingMatrixMarkdowns}
+              povCharacterId={project.povCharacterId}
+              onJumpToChapterSearch={async (chapterId, searchTerm) => {
+                await handleSelectChapter(chapterId);
+                setActiveTab('editor');
+                setJumpToSearchQuery(searchTerm);
+              }}
+              onOpenBibleEntity={(category: EntityCategory, entityId: string) => {
+                setActiveTab('bible');
+                if (category === 'character') {
+                  setBibleTab('characters');
+                  setSelectedCharId(entityId);
+                } else if (category === 'location') {
+                  setBibleTab('locations');
+                  setSelectedLocId(entityId);
+                } else if (category === 'item') {
+                  setBibleTab('items');
+                  setSelectedItemId(entityId);
+                } else if (category === 'world-rule') {
+                  setBibleTab('rules');
+                  setSelectedRuleId(entityId);
+                }
               }}
             />
           </div>

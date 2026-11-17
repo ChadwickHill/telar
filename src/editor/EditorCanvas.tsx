@@ -1038,6 +1038,9 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
         }
       });
 
+      setSearchQuery(jumpToSearchQuery);
+      setIsFindBarOpen(true);
+
       if (matches.length > 0) {
         const firstMatch = matches[0];
         editor.commands.command(({ tr, state }) => {
