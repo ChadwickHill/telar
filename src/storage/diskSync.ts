@@ -2,6 +2,7 @@ import {
   Chapter,
   Character,
   CharactersSchema,
+  CorkboardSchema,
   Item,
   ItemsSchema,
   Location,
@@ -635,6 +636,30 @@ function canonicalStyleHash(style: Style): string {
   return hashContent(styleToDiskMd(style));
 }
 
+function canonicalCorkboardHash(rawJson: string): string {
+  try {
+    const parsed = CorkboardSchema.safeParse(JSON.parse(rawJson));
+    if (parsed.success) {
+      return hashContent(JSON.stringify(parsed.data));
+    }
+  } catch {
+    // ignore malformed json
+  }
+  return hashContent(rawJson);
+}
+
+function formatCorkboardForDisk(rawJson: string): string {
+  try {
+    const parsed = CorkboardSchema.safeParse(JSON.parse(rawJson));
+    if (parsed.success) {
+      return JSON.stringify(parsed.data, null, 2);
+    }
+  } catch {
+    // ignore
+  }
+  return rawJson;
+}
+
 // ---- DiskFolderSync Service ------------------------------------------------
 
 const MANIFEST_DISK_PATH = '.xnovelist/sync-manifest.json';
@@ -1035,6 +1060,11 @@ export class DiskFolderSync {
           await this.idbStore.writeFile(`${prefix}Style.json`, nextStyleJson);
           await writeDiskFile(handle, '.xnovelist/Style.json', nextStyleJson);
           changedIdbPaths.push('Style.json');
+        } else if (conflict.idbPath === 'Corkboard.json') {
+          const parsedDisk = CorkboardSchema.safeParse(JSON.parse(conflict.diskContent));
+          const normalized = parsedDisk.success ? JSON.stringify(parsedDisk.data) : conflict.diskContent;
+          await this.idbStore.writeFile(`${prefix}Corkboard.json`, normalized);
+          changedIdbPaths.push('Corkboard.json');
         }
 
         const canonical = await this.computeCanonicalHashForVirtualPath(projectId, conflict.idbPath, conflict.diskContent);
@@ -1091,6 +1121,9 @@ export class DiskFolderSync {
     if (idbPath === 'Style.json') {
       const parsed = diskMdToStyle(content);
       return canonicalStyleHash(parsed);
+    }
+    if (idbPath === 'Corkboard.json') {
+      return canonicalCorkboardHash(content);
     }
     return hashContent(`${projectId}:${content}`);
   }
@@ -1396,7 +1429,15 @@ export class DiskFolderSync {
       await writeDiskFile(handle, '.xnovelist/WorldRules.json', state.worldRulesStr);
     }
     if (state.corkboardStr) {
-      await writeDiskFile(handle, '.xnovelist/Corkboard.json', state.corkboardStr);
+      const corkMtime = await writeDiskFile(handle, '.xnovelist/Corkboard.json', formatCorkboardForDisk(state.corkboardStr));
+      entries['Corkboard.json'] = {
+        idbPath: 'Corkboard.json',
+        diskPath: '.xnovelist/Corkboard.json',
+        baseHash: canonicalCorkboardHash(state.corkboardStr),
+        baseIdbUpdatedAt: now,
+        baseDiskMtimeMs: corkMtime,
+      };
+      pushedCount++;
     }
 
     const manifest: SyncManifest = {
@@ -1662,7 +1703,23 @@ export class DiskFolderSync {
     }
     const diskCorkboard = await readDiskFile(handle, '.xnovelist/Corkboard.json');
     if (diskCorkboard) {
-      await this.idbStore.writeFile(`${prefix}Corkboard.json`, diskCorkboard.content);
+      let normalizedCork = diskCorkboard.content;
+      try {
+        const parsedCork = CorkboardSchema.safeParse(JSON.parse(diskCorkboard.content));
+        if (parsedCork.success) {
+          normalizedCork = JSON.stringify(parsedCork.data);
+        }
+      } catch {
+        // keep raw content if malformed
+      }
+      await this.idbStore.writeFile(`${prefix}Corkboard.json`, normalizedCork);
+      entries['Corkboard.json'] = {
+        idbPath: 'Corkboard.json',
+        diskPath: '.xnovelist/Corkboard.json',
+        baseHash: canonicalCorkboardHash(normalizedCork),
+        baseIdbUpdatedAt: now,
+        baseDiskMtimeMs: diskCorkboard.mtimeMs,
+      };
       pulledPaths.push('Corkboard.json');
     }
 
@@ -2616,8 +2673,94 @@ export class DiskFolderSync {
       if (state.worldRulesStr) {
         await writeDiskFile(handle, '.xnovelist/WorldRules.json', state.worldRulesStr);
       }
-      if (state.corkboardStr) {
-        await writeDiskFile(handle, '.xnovelist/Corkboard.json', state.corkboardStr);
+
+      // ---- 8. Reconcile Corkboard (.xnovelist/Corkboard.json) ----------------
+      {
+        const idbPath = 'Corkboard.json';
+        const diskPath = '.xnovelist/Corkboard.json';
+        const diskCorkFile = await readDiskFile(handle, diskPath);
+        const baseHash = manifest.entries[idbPath]?.baseHash;
+
+        if (state.corkboardStr && !diskCorkFile) {
+          const mtimeMs = await writeDiskFile(handle, diskPath, formatCorkboardForDisk(state.corkboardStr));
+          nextEntries[idbPath] = {
+            idbPath,
+            diskPath,
+            baseHash: canonicalCorkboardHash(state.corkboardStr),
+            baseIdbUpdatedAt: now,
+            baseDiskMtimeMs: mtimeMs,
+          };
+          pushedCount++;
+        } else if (!state.corkboardStr && diskCorkFile) {
+          let normalized = diskCorkFile.content;
+          try {
+            const parsed = CorkboardSchema.safeParse(JSON.parse(diskCorkFile.content));
+            if (parsed.success) normalized = JSON.stringify(parsed.data);
+          } catch {
+            // ignore
+          }
+          await this.idbStore.writeFile(`${state.prefix}Corkboard.json`, normalized);
+          nextEntries[idbPath] = {
+            idbPath,
+            diskPath,
+            baseHash: canonicalCorkboardHash(normalized),
+            baseIdbUpdatedAt: now,
+            baseDiskMtimeMs: diskCorkFile.mtimeMs,
+          };
+          pulledPaths.push('Corkboard.json');
+        } else if (state.corkboardStr && diskCorkFile) {
+          const iHash = canonicalCorkboardHash(state.corkboardStr);
+          const dHash = canonicalCorkboardHash(diskCorkFile.content);
+          const idbChanged = !baseHash || iHash !== baseHash;
+          const diskChanged = !baseHash || dHash !== baseHash;
+
+          if (iHash === dHash) {
+            nextEntries[idbPath] = {
+              idbPath,
+              diskPath,
+              baseHash: iHash,
+              baseIdbUpdatedAt: now,
+              baseDiskMtimeMs: diskCorkFile.mtimeMs,
+            };
+          } else if (idbChanged && !diskChanged) {
+            const mtimeMs = await writeDiskFile(handle, diskPath, formatCorkboardForDisk(state.corkboardStr));
+            nextEntries[idbPath] = {
+              idbPath,
+              diskPath,
+              baseHash: iHash,
+              baseIdbUpdatedAt: now,
+              baseDiskMtimeMs: mtimeMs,
+            };
+            pushedCount++;
+          } else if (!idbChanged && diskChanged) {
+            let normalized = diskCorkFile.content;
+            try {
+              const parsed = CorkboardSchema.safeParse(JSON.parse(diskCorkFile.content));
+              if (parsed.success) normalized = JSON.stringify(parsed.data);
+            } catch {
+              // ignore
+            }
+            await this.idbStore.writeFile(`${state.prefix}Corkboard.json`, normalized);
+            nextEntries[idbPath] = {
+              idbPath,
+              diskPath,
+              baseHash: dHash,
+              baseIdbUpdatedAt: now,
+              baseDiskMtimeMs: diskCorkFile.mtimeMs,
+            };
+            pulledPaths.push('Corkboard.json');
+          } else {
+            conflicts.push({
+              idbPath,
+              diskPath,
+              label: 'Brainstorming Corkboard',
+              idbContent: formatCorkboardForDisk(state.corkboardStr),
+              diskContent: diskCorkFile.content,
+              idbUpdatedAt: now,
+              diskMtimeMs: diskCorkFile.mtimeMs,
+            });
+          }
+        }
       }
 
       const nextManifest: SyncManifest = {

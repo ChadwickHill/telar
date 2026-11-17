@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState, useRef } from 'react';
 import {
-  Settings, History, Plus, FolderPlus, ArrowLeft, Download,
+  Settings, History, Plus, FolderPlus, ArrowLeft, Download, LayoutGrid,
   Menu, MoreHorizontal, X as CloseIcon, BookOpen, Maximize2, Sparkles, MessageSquare, HelpCircle
 } from 'lucide-react';
 import { startTour, shouldAutoRun, TourSurface } from '../onboarding/tours';
@@ -16,7 +16,11 @@ import {
   SyncConflict,
   SyncStatus,
 } from '../storage/diskSync';
-import { Project, Chapter, Character, Location, Item, Style, CharacterSchema, LocationSchema, ItemSchema, SnapshotIndex } from '../storage/schemas';
+import {
+  Project, Chapter, Character, Location, Item, Style,
+  CharacterSchema, LocationSchema, ItemSchema, SnapshotIndex,
+  CorkboardSchema, Corkboard, BrainstormCard, PromotedRef
+} from '../storage/schemas';
 import { takeSnapshot } from '../storage/snapshots';
 import { runTool, executeWriteOp } from '../ai/runTool';
 import { makeCallModel } from '../ai/llm/client';
@@ -40,6 +44,14 @@ import { deriveSynopsis } from '../ai/continuity';
 import RestoreDeletedChaptersDialog from '../ui/RestoreDeletedChaptersDialog';
 import SyncStatusBadge, { SyncToast } from '../ui/SyncStatusBadge';
 import SyncConflictModal from '../ui/SyncConflictModal';
+import CorkboardCanvas from '../ui/CorkboardCanvas';
+
+const EMPTY_CORKBOARD: Corkboard = {
+  schemaVersion: 1,
+  viewport: { panX: 0, panY: 0, zoom: 1 },
+  cards: [],
+  links: [],
+};
 
 export interface BeatData {
   type: 'action' | 'reaction' | 'dialogue' | 'realization' | 'decision' | 'transition';
@@ -151,6 +163,7 @@ export default function WorkspacePage() {
   const [aiTranscript, setAiTranscript] = useState<TranscriptTurn[]>([]);
   const [beats, setBeats] = useState<Record<string, BeatData>>({});
   const [activeBeatId, setActiveBeatId] = useState<string | null>(null);
+  const [corkboard, setCorkboard] = useState<Corkboard>(EMPTY_CORKBOARD);
 
   // Reset transcript when switching novels
   useEffect(() => {
@@ -168,7 +181,7 @@ export default function WorkspacePage() {
   }, [projectList]);
 
   // Layout states
-  const [activeTab, setActiveTab] = useState<'editor' | 'outline' | 'bible' | 'settings'>('editor');
+  const [activeTab, setActiveTab] = useState<'editor' | 'outline' | 'corkboard' | 'bible' | 'settings'>('editor');
   const [isDistractionFree, setIsDistractionFree] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
 
@@ -336,6 +349,21 @@ export default function WorkspacePage() {
     }
     setItems(itemsData);
 
+    // Load Corkboard
+    let loadedCorkboard: Corkboard = EMPTY_CORKBOARD;
+    try {
+      const corkStr = await activeStore.readFile(`${prefix}Corkboard.json`);
+      if (corkStr) {
+        const parsedCork = CorkboardSchema.safeParse(JSON.parse(corkStr));
+        if (parsedCork.success) {
+          loadedCorkboard = parsedCork.data;
+        }
+      }
+    } catch {
+      // ignore missing corkboard file for legacy projects
+    }
+    setCorkboard(loadedCorkboard);
+
     // Load continuity files
     const contPaths = await activeStore.listFiles(`${prefix}Continuity/`);
     const loadedContinuity: Record<string, string> = {};
@@ -488,6 +516,7 @@ export default function WorkspacePage() {
           sensoryPalette: { dominantSenses: [], colorNotes: '', soundNotes: '' },
           pronounPairs: [],
         }));
+        await store.writeFile(`${prefix}Corkboard.json`, JSON.stringify(EMPTY_CORKBOARD));
         await store.writeFile(`${prefix}Artifacts/chapter-chapter-1.md`, '# Chapter 1\n\nStart writing your novel here...');
       }
 
@@ -782,6 +811,7 @@ export default function WorkspacePage() {
       sensoryPalette: { dominantSenses: [], colorNotes: '', soundNotes: '' },
       pronounPairs: [],
     }));
+    await storage.writeFile(`${prefix}Corkboard.json`, JSON.stringify(EMPTY_CORKBOARD));
     await storage.writeFile(`${prefix}Artifacts/chapter-chapter-1.md`, '# Chapter 1\n\nStart writing your novel here...');
 
     // Reset create modal
@@ -904,35 +934,240 @@ export default function WorkspacePage() {
     await storage.writeFile(`${prefix}Project.json`, JSON.stringify(updated));
   };
 
-  // Create chapter handler
-  const handleCreateChapter = async () => {
-    if (!storage || !project) return;
+  // Create chapter handler (supports optional prefilled prose/synopsis from Corkboard promotion)
+  const createChapterWithOptions = async (opts?: {
+    title?: string;
+    initialBody?: string;
+    synopsis?: string;
+  }): Promise<Chapter | undefined> => {
+    if (!storage || !project) return undefined;
     const prefix = `projects/${project.id}/`;
 
     const id = `chapter-${Date.now()}`;
-    const newTitle = `Chapter ${chapters.length + 1}`;
+    const newTitle = opts?.title?.trim() || `Chapter ${chapters.length + 1}`;
+    const now = new Date().toISOString();
     const newChapter: Chapter = {
       id,
       title: newTitle,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: now,
+      updatedAt: now,
       status: 'draft',
-      synopsis: '',
+      synopsis: opts?.synopsis || '',
     };
 
-    const newMarkdown = `# ${newTitle}\n\n`;
+    const bodyText = opts?.initialBody?.trim() ? `${opts.initialBody.trim()}\n` : '';
+    const newMarkdown = `# ${newTitle}\n\n${bodyText}`;
     await storage.writeFile(`${prefix}Artifacts/chapter-${id}.md`, newMarkdown);
 
-    const updatedOrder = [...project.chapterOrder, id];
-    const updatedProject = { ...project, activeChapterId: id, chapterOrder: updatedOrder };
+    if (opts?.synopsis?.trim()) {
+      const contMd = `# Continuity: ${newTitle}\n\n## Synopsis\n\n${opts.synopsis.trim()}\n`;
+      await storage.writeFile(`${prefix}Continuity/chapter-${id}.md`, contMd);
+      setContinuityList((prev) => ({ ...prev, [id]: contMd }));
+    }
 
+    const updatedOrder = [...project.chapterOrder, id];
+    const updatedProject = {
+      ...project,
+      activeChapterId: id,
+      chapterOrder: updatedOrder,
+      chapters: [...(project.chapters || []), newChapter],
+      updatedAt: now,
+    };
+
+    const initialWords = newMarkdown.trim() === '' ? 0 : newMarkdown.trim().split(/\s+/).length;
     setChapters([...chapters, newChapter]);
-    setWordCounts({ ...wordCounts, [id]: 2 });
+    setWordCounts({ ...wordCounts, [id]: initialWords });
     setProject(updatedProject);
     setActiveChapterMarkdown(newMarkdown);
 
     await storage.writeFile(`${prefix}Project.json`, JSON.stringify(updatedProject));
     await takeSnapshot(storage, id, 'manual', 'Chapter Created', newMarkdown, project.id);
+    return newChapter;
+  };
+
+  const handleCreateChapter = () => {
+    void createChapterWithOptions();
+  };
+
+  const handleUpdateCorkboard = async (next: Corkboard) => {
+    setCorkboard(next);
+    if (!storage || !project) return;
+    const prefix = `projects/${project.id}/`;
+    await storage.writeFile(`${prefix}Corkboard.json`, JSON.stringify(next));
+  };
+
+  const handlePromoteCorkboardCard = async (
+    card: BrainstormCard,
+    target: PromotedRef['kind']
+  ) => {
+    if (!storage || !project) return;
+    const prefix = `projects/${project.id}/`;
+    const now = new Date().toISOString();
+    let ref: PromotedRef | null = null;
+    let targetLabel = t('corkboardPromoteChapter');
+
+    if (target === 'chapter') {
+      const created = await createChapterWithOptions({
+        title: card.title.trim() || `Chapter ${chapters.length + 1}`,
+        initialBody: card.body,
+        synopsis: card.body.trim().slice(0, 240),
+      });
+      if (created) {
+        ref = {
+          kind: 'chapter',
+          id: created.id,
+          label: created.title,
+          promotedAt: now,
+        };
+        targetLabel = t('corkboardPromoteChapter');
+      }
+    } else if (target === 'character') {
+      const charId = `char-${Date.now()}`;
+      const charName = card.title.trim() || 'Untitled Character';
+      const newChar: Character = {
+        id: charId,
+        name: charName,
+        aliases: [],
+        traits: card.tags || [],
+        desires: [],
+        fears: [],
+        relationships: [],
+        notes: card.body.trim() || undefined,
+        evidence: [],
+        avatar: card.image,
+        color: card.color,
+      };
+      const nextChars = [...characters.characters, newChar];
+      const nextPayload = { schemaVersion: 1 as const, characters: nextChars };
+      setCharacters(nextPayload);
+      await storage.writeFile(`${prefix}Characters.json`, JSON.stringify(nextPayload));
+      ref = {
+        kind: 'character',
+        id: charId,
+        label: charName,
+        promotedAt: now,
+      };
+      targetLabel = t('corkboardPromoteCharacter');
+    } else if (target === 'location') {
+      const locId = `loc-${Date.now()}`;
+      const locName = card.title.trim() || 'Untitled Location';
+      const newLoc: Location = {
+        id: locId,
+        name: locName,
+        aliases: [],
+        scale: 'building',
+        descriptors: card.tags || [],
+        inhabitants: [],
+        notes: card.body.trim() || undefined,
+        evidence: [],
+        avatar: card.image,
+        color: card.color,
+      };
+      const nextLocs = [...locations.locations, newLoc];
+      const nextPayload = { schemaVersion: 1 as const, locations: nextLocs };
+      setLocations(nextPayload);
+      await storage.writeFile(`${prefix}Locations.json`, JSON.stringify(nextPayload));
+      ref = {
+        kind: 'location',
+        id: locId,
+        label: locName,
+        promotedAt: now,
+      };
+      targetLabel = t('corkboardPromoteLocation');
+    } else if (target === 'item') {
+      const itemId = `item-${Date.now()}`;
+      const itemName = card.title.trim() || 'Untitled Item';
+      const newItem: Item = {
+        id: itemId,
+        name: itemName,
+        aliases: [],
+        description: card.body.trim() || undefined,
+        evidence: [],
+        avatar: card.image,
+        color: card.color,
+      };
+      const nextItems = [...items.items, newItem];
+      const nextPayload = { schemaVersion: 1 as const, items: nextItems };
+      setItems(nextPayload);
+      await storage.writeFile(`${prefix}Items.json`, JSON.stringify(nextPayload));
+      ref = {
+        kind: 'item',
+        id: itemId,
+        label: itemName,
+        promotedAt: now,
+      };
+      targetLabel = t('corkboardPromoteItem');
+    } else if (target === 'world-rule') {
+      const ruleId = `rule-${Date.now()}`;
+      const ruleTitle = card.title.trim() || 'Untitled World Rule';
+      let existingRules: Array<Record<string, unknown>> = [];
+      try {
+        const rawRules = await storage.readFile(`${prefix}WorldRules.json`);
+        if (rawRules) {
+          const parsed = JSON.parse(rawRules);
+          if (Array.isArray(parsed?.rules)) {
+            existingRules = parsed.rules;
+          }
+        }
+      } catch {
+        // seed WorldRules.json
+      }
+      const newRule = {
+        id: ruleId,
+        title: ruleTitle,
+        category: 'other',
+        severity: 'hard',
+        statement: card.body.trim(),
+        alwaysActive: true,
+        keywords: card.tags || [],
+        evidence: [],
+        ...(card.color ? { color: card.color } : {}),
+      };
+      await storage.writeFile(
+        `${prefix}WorldRules.json`,
+        JSON.stringify({ schemaVersion: 1, rules: [...existingRules, newRule] })
+      );
+      ref = {
+        kind: 'world-rule',
+        id: ruleId,
+        label: ruleTitle,
+        promotedAt: now,
+      };
+      targetLabel = t('corkboardPromoteWorldRule');
+    }
+
+    if (ref) {
+      const updatedCorkboard: Corkboard = {
+        ...corkboard,
+        cards: corkboard.cards.map((c) =>
+          c.id === card.id ? { ...c, promotedRef: ref, updatedAt: now } : c
+        ),
+      };
+      await handleUpdateCorkboard(updatedCorkboard);
+      setSyncToastMsg(`${t('corkboardPromotedToast')}: ${ref.label || targetLabel}`);
+    }
+  };
+
+  const handleJumpToPromotedRef = async (ref: PromotedRef) => {
+    if (ref.kind === 'chapter') {
+      await handleSelectChapter(ref.id);
+      setActiveTab('editor');
+    } else if (ref.kind === 'character') {
+      setBibleTab('characters');
+      setSelectedCharId(ref.id);
+      setActiveTab('bible');
+    } else if (ref.kind === 'location') {
+      setBibleTab('locations');
+      setSelectedLocId(ref.id);
+      setActiveTab('bible');
+    } else if (ref.kind === 'item') {
+      setBibleTab('items');
+      setSelectedItemId(ref.id);
+      setActiveTab('bible');
+    } else if (ref.kind === 'world-rule') {
+      setActiveTab('bible');
+      setSyncToastMsg(ref.label ? `${ref.label} (WorldRules.json)` : 'WorldRules.json');
+    }
   };
 
   const handleSaveAIConfig = async (newConfig: WorkspaceAIConfig) => {
@@ -1820,6 +2055,14 @@ export default function WorkspacePage() {
                 {t('outlineTab')}
               </button>
               <button
+                onClick={() => setActiveTab('corkboard')}
+                className={`px-3 py-1 font-semibold rounded-none transition-all cursor-pointer ${
+                  activeTab === 'corkboard' ? 'bg-white dark:bg-[#20201e] shadow-sm text-[var(--accent)]' : 'opacity-75 hover:opacity-100'
+                }`}
+              >
+                {t('corkboardTab')}
+              </button>
+              <button
                 onClick={() => setActiveTab('bible')}
                 className={`px-3 py-1 font-semibold rounded-none transition-all cursor-pointer ${
                   activeTab === 'bible' ? 'bg-white dark:bg-[#20201e] shadow-sm text-[var(--accent)]' : 'opacity-75 hover:opacity-100'
@@ -1862,7 +2105,7 @@ export default function WorkspacePage() {
 
             {/* Guided tour — replays the current page's tour */}
             <button
-              onClick={() => launchTour(activeTab, true)}
+              onClick={() => launchTour(activeTab === 'corkboard' ? 'outline' : activeTab, true)}
               className="hidden sm:block p-1.5 rounded hover:bg-[var(--border)] text-[var(--foreground)] opacity-80 hover:opacity-100 transition-colors"
               title={t('takeTour')}
             >
@@ -2160,6 +2403,17 @@ export default function WorkspacePage() {
           </div>
         )}
 
+        {activeTab === 'corkboard' && (
+          <div className="flex-1 overflow-hidden h-full">
+            <CorkboardCanvas
+              corkboard={corkboard}
+              onUpdateCorkboard={handleUpdateCorkboard}
+              onPromoteCard={handlePromoteCorkboardCard}
+              onJumpToPromotedRef={handleJumpToPromotedRef}
+            />
+          </div>
+        )}
+
         {activeTab === 'bible' && (
           <div className="flex-1 overflow-hidden h-full">
             <BibleWorkspace
@@ -2283,6 +2537,7 @@ export default function WorkspacePage() {
             </div>
             {[
               { label: t('outlineTab'), icon: BookOpen, onClick: () => { setActiveTab('outline'); setIsMobileMoreOpen(false); } },
+              { label: t('corkboardTab'), icon: LayoutGrid, onClick: () => { setActiveTab('corkboard'); setIsMobileMoreOpen(false); } },
               { label: t('bible'), icon: BookOpen, onClick: () => { setActiveTab('bible'); setIsMobileMoreOpen(false); } },
               { label: t('settingsTab'), icon: Settings, onClick: () => { setActiveTab('settings'); setIsMobileMoreOpen(false); } },
               { label: t('snapshots'), icon: History, onClick: () => { setIsHistoryOpen(true); setIsMobileMoreOpen(false); } },
@@ -2290,7 +2545,7 @@ export default function WorkspacePage() {
               { label: t('distractionFree'), icon: Maximize2, onClick: () => { setIsDistractionFree(true); setIsMobileMoreOpen(false); } },
               { label: t('generalSettings'), icon: Settings, onClick: () => { setShowAISettingsPage(true); setSettingsTab('general'); setIsMobileMoreOpen(false); } },
               { label: t('aiSettings'), icon: Sparkles, onClick: () => { setShowAISettingsPage(true); setSettingsTab('ai'); setIsMobileMoreOpen(false); } },
-              { label: t('takeTour'), icon: HelpCircle, onClick: () => { setIsMobileMoreOpen(false); launchTour(activeTab, true); } },
+              { label: t('takeTour'), icon: HelpCircle, onClick: () => { setIsMobileMoreOpen(false); launchTour(activeTab === 'corkboard' ? 'outline' : activeTab, true); } },
               { label: t('giveFeedback'), icon: MessageSquare, onClick: () => { window.open('https://forms.gle/42RaT4ZCjLJreTsG7', '_blank'); setIsMobileMoreOpen(false); } },
             ].map(({ label, icon: Icon, onClick }) => (
               <button

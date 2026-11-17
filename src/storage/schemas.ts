@@ -231,3 +231,66 @@ export const SyncManifestSchema = z.object({
 
 export type SyncManifest = z.infer<typeof SyncManifestSchema>;
 
+// ---- Spatial Brainstorming Corkboard (Milestone 2) -------------------------
+
+export const BrainstormCardTypeSchema = z.enum([
+  'idea',
+  'scene',
+  'character',
+  'location',
+  'world-rule',
+  'plot-thread',
+]);
+
+export type BrainstormCardType = z.infer<typeof BrainstormCardTypeSchema>;
+
+export const PromotedRefSchema = z.object({
+  kind: z.enum(['chapter', 'character', 'location', 'item', 'world-rule']),
+  id: z.string(),
+  label: z.string().optional(),
+  promotedAt: z.string(),
+});
+
+export type PromotedRef = z.infer<typeof PromotedRefSchema>;
+
+export const BrainstormCardSchema = z.object({
+  id: z.string(),
+  type: BrainstormCardTypeSchema.default('idea'),
+  title: z.string(),
+  body: z.string().default(''),
+  tags: z.array(z.string()).default([]),
+  color: z.string().optional(),
+  image: z.string().optional(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().default(240),
+  promotedRef: PromotedRefSchema.optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export type BrainstormCard = z.infer<typeof BrainstormCardSchema>;
+
+export const BrainstormLinkSchema = z.object({
+  id: z.string(),
+  fromCardId: z.string(),
+  toCardId: z.string(),
+  label: z.string().default(''),
+});
+
+export type BrainstormLink = z.infer<typeof BrainstormLinkSchema>;
+
+export const CorkboardSchema = z.object({
+  schemaVersion: z.literal(1),
+  viewport: z.object({
+    panX: z.number().default(0),
+    panY: z.number().default(0),
+    zoom: z.number().min(0.25).max(2.5).default(1),
+  }).default({ panX: 0, panY: 0, zoom: 1 }),
+  cards: z.array(BrainstormCardSchema).default([]),
+  links: z.array(BrainstormLinkSchema).default([]),
+});
+
+export type Corkboard = z.infer<typeof CorkboardSchema>;
+
+
