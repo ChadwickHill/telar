@@ -9,6 +9,13 @@ import { startTour, shouldAutoRun, TourSurface } from '../onboarding/tours';
 import { useTranslation } from '../i18n/useTranslation';
 import { IndexedDBProjectStorage } from '../storage/IndexedDBProjectStorage';
 import { ProjectStorage } from '../storage/ProjectStorage';
+import { SyncingProjectStorage } from '../storage/SyncingProjectStorage';
+import {
+  DiskFolderSync,
+  FolderInspectionResult,
+  SyncConflict,
+  SyncStatus,
+} from '../storage/diskSync';
 import { Project, Chapter, Character, Location, Item, Style, CharacterSchema, LocationSchema, ItemSchema, SnapshotIndex } from '../storage/schemas';
 import { takeSnapshot } from '../storage/snapshots';
 import { runTool, executeWriteOp } from '../ai/runTool';
@@ -31,6 +38,8 @@ import SelectionAIToolbar from '../ui/SelectionAIToolbar';
 import FlashPage from '../ui/FlashPage';
 import { deriveSynopsis } from '../ai/continuity';
 import RestoreDeletedChaptersDialog from '../ui/RestoreDeletedChaptersDialog';
+import SyncStatusBadge, { SyncToast } from '../ui/SyncStatusBadge';
+import SyncConflictModal from '../ui/SyncConflictModal';
 
 export interface BeatData {
   type: 'action' | 'reaction' | 'dialogue' | 'realization' | 'decision' | 'transition';
@@ -235,9 +244,172 @@ export default function WorkspacePage() {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [jumpToSearchQuery, setJumpToSearchQuery] = useState<string | null>(null);
 
+  // Local Folder Sync states & refs (Milestone 1)
+  const diskSyncRef = useRef<DiskFolderSync | null>(null);
+  const syncingStorageRef = useRef<SyncingProjectStorage | null>(null);
+  const currentProjectIdRef = useRef<string | null>(null);
+  const [syncSupported, setSyncSupported] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('disconnected');
+  const [syncFolderName, setSyncFolderName] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [syncConflicts, setSyncConflicts] = useState<SyncConflict[]>([]);
+  const [isConflictModalOpen, setIsConflictModalOpen] = useState(false);
+  const [syncToastMsg, setSyncToastMsg] = useState<string | null>(null);
+  const [pendingFolderLink, setPendingFolderLink] = useState<FolderInspectionResult | null>(null);
+
+  useEffect(() => {
+    currentProjectIdRef.current = currentProjectId;
+  }, [currentProjectId]);
+
+  useEffect(() => {
+    if (!syncToastMsg) return;
+    const timer = window.setTimeout(() => setSyncToastMsg(null), 4500);
+    return () => window.clearTimeout(timer);
+  }, [syncToastMsg]);
+
+  const reloadProjectFromStore = async (projId: string, activeStore: ProjectStorage) => {
+    const prefix = `projects/${projId}/`;
+    const projectStr = await activeStore.readFile(`${prefix}Project.json`);
+    if (projectStr) {
+      const loadedProj: Project = JSON.parse(projectStr);
+      setProject(loadedProj);
+
+      // Load chapters
+      const paths = await activeStore.listFiles(`${prefix}Artifacts/chapter-`);
+      const loadedChapters: Chapter[] = [];
+      const wCounts: Record<string, number> = {};
+
+      for (const p of paths) {
+        const id = p.replace(`${prefix}Artifacts/chapter-`, '').replace('.md', '');
+        const md = (await activeStore.readFile(p)) || '';
+        const count = md.trim() === '' ? 0 : md.trim().split(/\s+/).length;
+        wCounts[id] = count;
+
+        const existingChap = (loadedProj.chapters || []).find((c: Chapter) => c.id === id);
+
+        loadedChapters.push({
+          id,
+          title: md.split('\n')[0].replace('#', '').trim() || existingChap?.title || `Chapter ${id}`,
+          createdAt: existingChap?.createdAt || new Date().toISOString(),
+          updatedAt: existingChap?.updatedAt || new Date().toISOString(),
+          synopsis: existingChap?.synopsis || '',
+          status: existingChap?.status || 'draft',
+        });
+      }
+
+      setChapters(loadedChapters);
+      setWordCounts(wCounts);
+
+      const activeMd = (await activeStore.readFile(`${prefix}Artifacts/chapter-${loadedProj.activeChapterId}.md`)) || '';
+      setActiveChapterMarkdown(activeMd);
+
+      // Scan for chapters with history
+      const histPrefix = `${prefix}.history/Artifacts/`;
+      const historyFiles = await activeStore.listFiles(histPrefix);
+      const withHistory = new Set<string>();
+      historyFiles.forEach((file) => {
+        const match = file.match(/\.history\/Artifacts\/chapter-([^/]+)\/index\.json$/);
+        if (match) {
+          withHistory.add(match[1]);
+        }
+      });
+      setChaptersWithHistory(withHistory);
+    }
+
+    // Load Story Bible
+    const charsStr = await activeStore.readFile(`${prefix}Characters.json`);
+    if (charsStr) setCharacters(JSON.parse(charsStr));
+
+    const locsStr = await activeStore.readFile(`${prefix}Locations.json`);
+    if (locsStr) setLocations(JSON.parse(locsStr));
+
+    const styleStr = await activeStore.readFile(`${prefix}Style.json`);
+    if (styleStr) setStyle(JSON.parse(styleStr));
+
+    let itemsData: { schemaVersion: 1; items: Item[] } = { schemaVersion: 1, items: [] };
+    try {
+      const itemsStr = await activeStore.readFile(`${prefix}Items.json`);
+      if (itemsStr) itemsData = JSON.parse(itemsStr);
+    } catch {
+      // ignore missing items file for legacy projects
+    }
+    setItems(itemsData);
+
+    // Load continuity files
+    const contPaths = await activeStore.listFiles(`${prefix}Continuity/`);
+    const loadedContinuity: Record<string, string> = {};
+    for (const p of contPaths) {
+      const id = p.replace(`${prefix}Continuity/chapter-`, '').replace('.md', '');
+      const content = (await activeStore.readFile(p)) || '';
+      loadedContinuity[id] = content;
+    }
+    setContinuityList(loadedContinuity);
+
+    // Load Beats sidecar
+    let loadedBeats: Record<string, BeatData> = {};
+    try {
+      const beatsStr = await activeStore.readFile(`${prefix}Beats.json`);
+      if (beatsStr) {
+        loadedBeats = JSON.parse(beatsStr);
+      }
+    } catch {
+      // ignore
+    }
+    setBeats(loadedBeats);
+    setActiveBeatId(null);
+
+    // Sync beat params into ProseMirror node attrs after editor settles
+    if (Object.keys(loadedBeats).length > 0) {
+      setTimeout(() => {
+        if (!editorRef.current) return;
+        for (const [beatId, data] of Object.entries(loadedBeats)) {
+          editorRef.current.syncBeatAttrs(beatId, {
+            beatType: data.type,
+            beatMode: data.mode || 'write_beat',
+            beatLength: data.length,
+            beatIntent: data.intent,
+          });
+        }
+      }, 150);
+    }
+  };
+
   // Initialize DB and load project registry
   useEffect(() => {
-    const store = new IndexedDBProjectStorage();
+    const idbStore = new IndexedDBProjectStorage();
+    const diskSync = new DiskFolderSync(idbStore, {
+      onStatusChange: (status, meta) => {
+        setSyncStatus(status);
+        setSyncFolderName(meta.folderName);
+        setLastSyncedAt(meta.lastSyncedAt);
+        setSyncError(meta.error);
+      },
+      onConflictsChange: (conflicts) => {
+        setSyncConflicts(conflicts);
+      },
+      onExternalSyncReload: async () => {
+        const pid = currentProjectIdRef.current;
+        if (!pid) return;
+        await reloadProjectFromStore(pid, idbStore);
+        const listStr = await idbStore.readFile('projects.json');
+        if (listStr) {
+          try {
+            setProjectList(JSON.parse(listStr));
+          } catch {
+            // ignore
+          }
+        }
+      },
+      onToast: (message) => {
+        setSyncToastMsg(message);
+      },
+    });
+    const store = new SyncingProjectStorage(idbStore, diskSync);
+    diskSyncRef.current = diskSync;
+    syncingStorageRef.current = store;
+    setSyncSupported(DiskFolderSync.isSupported());
+    setSyncStatus(DiskFolderSync.isSupported() ? 'disconnected' : 'unsupported');
     setStorage(store);
 
     const loadRegistry = async () => {
@@ -395,6 +567,8 @@ export default function WorkspacePage() {
       // rename); those inputs handle their own Escape and stop propagation.
       // We still get the event because we listen in the capture-less bubble
       // phase, so input handlers run first.
+      if (pendingFolderLink !== null) { setPendingFolderLink(null); return; }
+      if (isConflictModalOpen) { setIsConflictModalOpen(false); return; }
       if (deleteConfirmId !== null) { setDeleteConfirmId(null); return; }
       if (projectDeleteId !== null) { setProjectDeleteId(null); return; }
       if (isRestoreDeletedOpen) { setIsRestoreDeletedOpen(false); return; }
@@ -410,6 +584,8 @@ export default function WorkspacePage() {
     window.addEventListener('keydown', handleEsc);
     return () => window.removeEventListener('keydown', handleEsc);
   }, [
+    pendingFolderLink,
+    isConflictModalOpen,
     deleteConfirmId,
     projectDeleteId,
     isRestoreDeletedOpen,
@@ -422,6 +598,21 @@ export default function WorkspacePage() {
     showAISettingsPage,
     isDistractionFree,
   ]);
+
+  // Reconcile disk folder automatically when user refocuses the browser window
+  useEffect(() => {
+    if (!currentProjectId) return;
+    const handleWindowFocus = () => {
+      const pid = currentProjectIdRef.current;
+      if (!pid || !diskSyncRef.current) return;
+      void (async () => {
+        await syncingStorageRef.current?.flushProject(pid).catch(() => {});
+        await diskSyncRef.current?.reconcile(pid).catch(() => {});
+      })();
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => window.removeEventListener('focus', handleWindowFocus);
+  }, [currentProjectId]);
 
   // Theme Syncing
   useEffect(() => {
@@ -514,112 +705,15 @@ export default function WorkspacePage() {
       }
     }
 
+    currentProjectIdRef.current = projId;
     setCurrentProjectId(projId);
+    syncingStorageRef.current?.setActiveProjectId(projId);
 
-    const prefix = `projects/${projId}/`;
-    const projectStr = await activeStore.readFile(`${prefix}Project.json`);
-    if (projectStr) {
-      const loadedProj: Project = JSON.parse(projectStr);
-      setProject(loadedProj);
+    await reloadProjectFromStore(projId, activeStore);
 
-      // Load chapters
-      const paths = await activeStore.listFiles(`${prefix}Artifacts/chapter-`);
-      const loadedChapters: Chapter[] = [];
-      const wCounts: Record<string, number> = {};
-
-      for (const p of paths) {
-        const id = p.replace(`${prefix}Artifacts/chapter-`, '').replace('.md', '');
-        const md = await activeStore.readFile(p) || '';
-        const count = md.trim() === '' ? 0 : md.trim().split(/\s+/).length;
-        wCounts[id] = count;
-
-        const existingChap = (loadedProj.chapters || []).find((c: Chapter) => c.id === id);
-
-        loadedChapters.push({
-          id,
-          title: md.split('\n')[0].replace('#', '').trim() || `Chapter ${id}`,
-          createdAt: existingChap?.createdAt || new Date().toISOString(),
-          updatedAt: existingChap?.updatedAt || new Date().toISOString(),
-          synopsis: existingChap?.synopsis || '',
-          status: existingChap?.status || 'draft',
-        });
-      }
-
-      setChapters(loadedChapters);
-      setWordCounts(wCounts);
-
-      const activeMd = await activeStore.readFile(`${prefix}Artifacts/chapter-${loadedProj.activeChapterId}.md`) || '';
-      setActiveChapterMarkdown(activeMd);
-
-      // Scan for chapters with history
-      const histPrefix = `${prefix}.history/Artifacts/`;
-      const historyFiles = await activeStore.listFiles(histPrefix);
-      const withHistory = new Set<string>();
-      historyFiles.forEach(file => {
-        const match = file.match(/\.history\/Artifacts\/chapter-([^/]+)\/index\.json$/);
-        if (match) {
-          withHistory.add(match[1]);
-        }
-      });
-      setChaptersWithHistory(withHistory);
-    }
-
-    // Load Story Bible
-    const charsStr = await activeStore.readFile(`${prefix}Characters.json`);
-    if (charsStr) setCharacters(JSON.parse(charsStr));
-
-    const locsStr = await activeStore.readFile(`${prefix}Locations.json`);
-    if (locsStr) setLocations(JSON.parse(locsStr));
-
-    const styleStr = await activeStore.readFile(`${prefix}Style.json`);
-    if (styleStr) setStyle(JSON.parse(styleStr));
-
-    let itemsData: { schemaVersion: 1; items: Item[] } = { schemaVersion: 1, items: [] };
-    try {
-      const itemsStr = await activeStore.readFile(`${prefix}Items.json`);
-      if (itemsStr) itemsData = JSON.parse(itemsStr);
-    } catch (e) {
-      // ignore missing items file for legacy projects
-    }
-    setItems(itemsData);
-
-    // Load continuity files
-    const contPaths = await activeStore.listFiles(`${prefix}Continuity/`);
-    const loadedContinuity: Record<string, string> = {};
-    for (const p of contPaths) {
-      const id = p.replace(`${prefix}Continuity/chapter-`, '').replace('.md', '');
-      const content = await activeStore.readFile(p) || '';
-      loadedContinuity[id] = content;
-    }
-    setContinuityList(loadedContinuity);
-
-    // Load Beats sidecar
-    let loadedBeats: Record<string, BeatData> = {};
-    try {
-      const beatsStr = await activeStore.readFile(`${prefix}Beats.json`);
-      if (beatsStr) {
-        loadedBeats = JSON.parse(beatsStr);
-      }
-    } catch (e) {
-      // ignore
-    }
-    setBeats(loadedBeats);
-    setActiveBeatId(null);
-
-    // Sync beat params into ProseMirror node attrs after the editor has
-    // finished loading the new chapter markdown (short delay lets Tiptap settle).
-    if (Object.keys(loadedBeats).length > 0) {
-      setTimeout(() => {
-        if (!editorRef.current) return;
-        for (const [beatId, data] of Object.entries(loadedBeats)) {
-          editorRef.current.syncBeatAttrs(beatId, {
-            beatType: data.type,
-            beatMode: data.mode || 'write_beat',
-            beatLength: data.length,
-            beatIntent: data.intent,
-          });
-        }
-      }, 150);
+    // Check linked local folder & reconcile if permission granted
+    if (diskSyncRef.current) {
+      await diskSyncRef.current.loadProjectLink(projId).catch(() => {});
     }
   };
 
@@ -709,6 +803,8 @@ export default function WorkspacePage() {
     if (!storage || !projectDeleteId) return;
     const id = projectDeleteId;
 
+    await diskSyncRef.current?.unlinkFolder(id).catch(() => {});
+
     const updatedList = projectList.filter((p) => p.id !== id);
     setProjectList(updatedList);
     await storage.writeFile('projects.json', JSON.stringify(updatedList));
@@ -726,6 +822,13 @@ export default function WorkspacePage() {
   const handleBackToDashboard = async () => {
     if (!storage || !project) return;
 
+    // Flush any queued debounced disk writes before leaving workspace
+    if (currentProjectId) {
+      await syncingStorageRef.current?.flushProject(currentProjectId).catch(() => {});
+    }
+    syncingStorageRef.current?.setActiveProjectId(null);
+    diskSyncRef.current?.clearActiveProject();
+
     // Update registry list timestamp
     const updatedList = projectList.map((p) =>
       p.id === currentProjectId ? { ...p, updatedAt: new Date().toISOString() } : p
@@ -741,8 +844,52 @@ export default function WorkspacePage() {
       window.history.replaceState({}, '', url.toString());
     }
 
+    currentProjectIdRef.current = null;
     setCurrentProjectId(null);
     setProject(null);
+  };
+
+  // ---- Local Folder Sync Handlers ----------------------------------------
+  const handleLinkFolder = async () => {
+    if (!project || !diskSyncRef.current) return;
+    const inspection = await diskSyncRef.current.pickAndInspectFolder();
+    if (!inspection) return;
+    if (inspection.hasExistingNovel) {
+      setPendingFolderLink(inspection);
+    } else {
+      await diskSyncRef.current.completeLink(project.id, inspection.handle, 'push');
+    }
+  };
+
+  const handleCompletePendingLink = async (mode: 'push' | 'pull') => {
+    if (!project || !diskSyncRef.current || !pendingFolderLink) return;
+    const handle = pendingFolderLink.handle;
+    setPendingFolderLink(null);
+    await diskSyncRef.current.completeLink(project.id, handle, mode);
+  };
+
+  const handleSyncNow = async () => {
+    if (!project || !diskSyncRef.current) return;
+    await syncingStorageRef.current?.flushProject(project.id).catch(() => {});
+    await diskSyncRef.current.reconcile(project.id);
+  };
+
+  const handleReconnectFolder = async () => {
+    if (!project || !diskSyncRef.current) return;
+    await diskSyncRef.current.requestFolderPermission(project.id);
+  };
+
+  const handleUnlinkFolder = async () => {
+    if (!project || !diskSyncRef.current) return;
+    await diskSyncRef.current.unlinkFolder(project.id);
+  };
+
+  const handleResolveConflict = async (conflict: SyncConflict, choice: 'idb' | 'disk') => {
+    if (!project || !diskSyncRef.current) return;
+    await diskSyncRef.current.resolveConflict(project.id, conflict, choice);
+    if (diskSyncRef.current.getState().conflicts.length === 0) {
+      setIsConflictModalOpen(false);
+    }
   };
 
   // Active Chapter select handler
@@ -1118,16 +1265,18 @@ export default function WorkspacePage() {
   const handleDeleteActiveProject = async () => {
     if (!storage || !project) return;
     const prefix = `projects/${project.id}/`;
-    
+
+    await diskSyncRef.current?.unlinkFolder(project.id).catch(() => {});
+
     const allFiles = await storage.listFiles(prefix);
     for (const f of allFiles) {
       await storage.deleteFile(f);
     }
-    
+
     const updatedList = projectList.filter(p => p.id !== project.id);
     setProjectList(updatedList);
     await storage.writeFile('projects.json', JSON.stringify(updatedList));
-    
+
     handleBackToDashboard();
   };
 
@@ -1688,6 +1837,17 @@ export default function WorkspacePage() {
               </button>
             </div>
 
+            <SyncStatusBadge
+              status={syncStatus}
+              folderName={syncFolderName}
+              conflictCount={syncConflicts.length}
+              error={syncError}
+              onSyncNow={handleSyncNow}
+              onReconnect={handleReconnectFolder}
+              onOpenConflicts={() => setIsConflictModalOpen(true)}
+              onOpenSyncSettings={() => setActiveTab('settings')}
+            />
+
             <span className="w-px h-5 bg-[var(--border)] hidden sm:block" />
 
             {/* Snapshot history button */}
@@ -2056,6 +2216,17 @@ export default function WorkspacePage() {
               }}
               onArchiveProject={handleArchiveProject}
               onDeleteProject={handleDeleteActiveProject}
+              syncSupported={syncSupported}
+              syncStatus={syncStatus}
+              syncFolderName={syncFolderName}
+              lastSyncedAt={lastSyncedAt}
+              syncError={syncError}
+              conflictCount={syncConflicts.length}
+              onLinkFolder={handleLinkFolder}
+              onSyncNow={handleSyncNow}
+              onReconnectFolder={handleReconnectFolder}
+              onUnlinkFolder={handleUnlinkFolder}
+              onOpenConflicts={() => setIsConflictModalOpen(true)}
             />
           </div>
         )}
@@ -2191,6 +2362,56 @@ export default function WorkspacePage() {
           onClose={() => setIsCommandPaletteOpen(false)}
         />
       )}
+
+      {/* Non-empty Folder Link Prompt */}
+      {pendingFolderLink && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 select-none">
+          <div className="w-full max-w-md bg-white dark:bg-[#1e1e1d] border border-[var(--border)] shadow-2xl p-5 space-y-4">
+            <div className="space-y-1">
+              <h3 className="text-sm font-bold text-[var(--foreground)]">
+                {t('linkExistingFolderTitle')}
+              </h3>
+              <p className="text-xs opacity-75 leading-relaxed">
+                {t('linkExistingFolderDesc')}
+              </p>
+              <p className="text-[11px] font-mono opacity-65 pt-1">
+                {pendingFolderLink.folderName} ({pendingFolderLink.mdFileCount} .md)
+              </p>
+            </div>
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                onClick={() => handleCompletePendingLink('push')}
+                className="w-full px-3.5 py-2 border border-[var(--border)] hover:border-[var(--accent)] text-xs font-bold text-left cursor-pointer"
+              >
+                {t('pushBrowserToFolder')}
+              </button>
+              <button
+                onClick={() => handleCompletePendingLink('pull')}
+                className="w-full px-3.5 py-2 bg-[var(--accent)] text-white hover:opacity-90 text-xs font-bold text-left cursor-pointer"
+              >
+                {t('importFolderToBrowser')}
+              </button>
+              <button
+                onClick={() => setPendingFolderLink(null)}
+                className="w-full px-3.5 py-1.5 text-xs opacity-70 hover:opacity-100 text-center cursor-pointer"
+              >
+                {t('cancel')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sync Conflict Resolution Modal */}
+      <SyncConflictModal
+        isOpen={isConflictModalOpen}
+        conflicts={syncConflicts}
+        onResolve={handleResolveConflict}
+        onClose={() => setIsConflictModalOpen(false)}
+      />
+
+      {/* Non-blocking Sync Toast */}
+      <SyncToast message={syncToastMsg} onDismiss={() => setSyncToastMsg(null)} />
     </div>
   );
 }

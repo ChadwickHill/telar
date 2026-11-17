@@ -1,7 +1,20 @@
 import React, { useState } from 'react';
 import { Project, Character } from '../storage/schemas';
+import { SyncStatus } from '../storage/diskSync';
 import { useTranslation } from '../i18n/useTranslation';
-import { Trash2, Archive, ShieldAlert, Image as ImageIcon } from 'lucide-react';
+import {
+  Trash2,
+  Archive,
+  ShieldAlert,
+  Image as ImageIcon,
+  FolderSync,
+  FolderOpen,
+  RefreshCw,
+  FolderKey,
+  Unlink,
+  AlertTriangle,
+  ShieldCheck,
+} from 'lucide-react';
 
 interface ProjectSettingsProps {
   project: Project;
@@ -11,6 +24,17 @@ interface ProjectSettingsProps {
   onSwitchToBibleCharacters: () => void;
   onArchiveProject: (archived: boolean) => void;
   onDeleteProject: () => void;
+  syncSupported?: boolean;
+  syncStatus?: SyncStatus;
+  syncFolderName?: string | null;
+  lastSyncedAt?: string | null;
+  syncError?: string | null;
+  conflictCount?: number;
+  onLinkFolder?: () => void;
+  onSyncNow?: () => void;
+  onReconnectFolder?: () => void;
+  onUnlinkFolder?: () => void;
+  onOpenConflicts?: () => void;
 }
 
 export default function ProjectSettings({
@@ -21,6 +45,17 @@ export default function ProjectSettings({
   onSwitchToBibleCharacters,
   onArchiveProject,
   onDeleteProject,
+  syncSupported = false,
+  syncStatus = 'disconnected',
+  syncFolderName = null,
+  lastSyncedAt = null,
+  syncError = null,
+  conflictCount = 0,
+  onLinkFolder,
+  onSyncNow,
+  onReconnectFolder,
+  onUnlinkFolder,
+  onOpenConflicts,
 }: ProjectSettingsProps) {
   const { t } = useTranslation();
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
@@ -328,8 +363,135 @@ export default function ProjectSettings({
             </div>
           </div>
 
+          {/* Local Folder Sync Card */}
+          <div className="bg-white dark:bg-[#1e1e1d] border border-[var(--border)] p-5 rounded-none flex flex-col justify-between space-y-4">
+            <div>
+              <h3 className="text-xs font-bold uppercase tracking-wider text-[var(--foreground)] border-b border-[var(--border)]/40 pb-2 mb-3 flex items-center gap-2">
+                <FolderSync size={14} className="text-[var(--accent)]" />
+                <span>{t('localFolderSync')}</span>
+              </h3>
+
+              <div className="space-y-3">
+                <p className="text-[11px] opacity-75 leading-relaxed">
+                  {t('localFolderSyncDesc')}
+                </p>
+
+                {!syncSupported ? (
+                  <div className="text-[11px] p-3 border border-dashed border-[var(--border)] bg-[var(--editor-bg)] opacity-85 leading-relaxed">
+                    {t('syncUnsupportedNotice')}
+                  </div>
+                ) : (
+                  <>
+                    <div className="p-3 border border-[var(--border)] bg-[var(--editor-bg)] space-y-1.5 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] uppercase font-bold opacity-65">{t('linkedFolder')}</span>
+                        <span
+                          className={`text-[10px] font-bold uppercase px-1.5 py-0.5 border ${
+                            syncStatus === 'synced'
+                              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                              : syncStatus === 'needs-permission'
+                              ? 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                              : syncStatus === 'conflict' || syncStatus === 'error'
+                              ? 'border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400'
+                              : syncStatus === 'syncing'
+                              ? 'border-[var(--accent)]/40 bg-[var(--accent)]/10 text-[var(--accent)]'
+                              : 'border-[var(--border)] opacity-70'
+                          }`}
+                        >
+                          {syncStatus === 'synced'
+                            ? t('syncStatusSynced')
+                            : syncStatus === 'syncing'
+                            ? t('syncStatusSyncing')
+                            : syncStatus === 'needs-permission'
+                            ? t('syncStatusNeedsPerm')
+                            : syncStatus === 'conflict'
+                            ? `${t('syncStatusConflict')} (${conflictCount})`
+                            : syncStatus === 'error'
+                            ? t('syncStatusError')
+                            : t('syncStatusDisconnected')}
+                        </span>
+                      </div>
+
+                      <div className="font-mono text-xs font-semibold truncate text-[var(--foreground)]">
+                        {syncFolderName || t('notLinked')}
+                      </div>
+
+                      {lastSyncedAt && syncFolderName && (
+                        <div className="text-[10px] opacity-65">
+                          {t('lastSynced')}: {new Date(lastSyncedAt).toLocaleString()}
+                        </div>
+                      )}
+
+                      {syncError && (
+                        <div className="text-[10px] text-red-600 dark:text-red-400 pt-1">
+                          {syncError}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <button
+                        onClick={onLinkFolder}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-[var(--border)] hover:border-[var(--accent)] bg-[var(--background)] text-xs font-semibold cursor-pointer transition-colors"
+                      >
+                        <FolderOpen size={13} />
+                        <span>{syncFolderName ? t('changeFolder') : t('linkLocalFolder')}</span>
+                      </button>
+
+                      {syncFolderName && syncStatus === 'needs-permission' && (
+                        <button
+                          onClick={onReconnectFolder}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold cursor-pointer transition-colors"
+                        >
+                          <FolderKey size={13} />
+                          <span>{t('reconnectFolder')}</span>
+                        </button>
+                      )}
+
+                      {syncFolderName && syncStatus !== 'needs-permission' && (
+                        <button
+                          disabled={syncStatus === 'syncing'}
+                          onClick={onSyncNow}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-[var(--border)] hover:bg-[var(--border)]/40 text-xs font-semibold cursor-pointer transition-colors disabled:opacity-50"
+                        >
+                          <RefreshCw size={13} className={syncStatus === 'syncing' ? 'animate-spin' : ''} />
+                          <span>{t('syncNow')}</span>
+                        </button>
+                      )}
+
+                      {conflictCount > 0 && (
+                        <button
+                          onClick={onOpenConflicts}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold cursor-pointer transition-colors"
+                        >
+                          <AlertTriangle size={13} />
+                          <span>{t('resolveConflictsBtn')} ({conflictCount})</span>
+                        </button>
+                      )}
+
+                      {syncFolderName && (
+                        <button
+                          onClick={onUnlinkFolder}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-red-500/30 hover:border-red-500/70 text-red-500 text-xs font-semibold cursor-pointer transition-colors"
+                        >
+                          <Unlink size={13} />
+                          <span>{t('unlinkFolder')}</span>
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                <div className="flex items-start gap-2 pt-2 border-t border-[var(--border)]/20 text-[10px] opacity-65">
+                  <ShieldCheck size={13} className="shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />
+                  <span>{t('localFolderPrivacyNote')}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Danger Zone Card */}
-          <div className="bg-red-50/10 dark:bg-red-950/5 border border-red-500/20 p-5 rounded-none flex flex-col justify-between space-y-4">
+          <div className="md:col-span-2 bg-red-50/10 dark:bg-red-950/5 border border-red-500/20 p-5 rounded-none flex flex-col justify-between space-y-4">
             <div>
               <h3 className="text-xs font-bold uppercase tracking-wider text-red-500 border-b border-red-500/20 pb-2 mb-3">
                 {t('dangerZone')}

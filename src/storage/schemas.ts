@@ -203,3 +203,31 @@ export const SnapshotIndexSchema = z.object({
 });
 
 export type SnapshotIndex = z.infer<typeof SnapshotIndexSchema>;
+
+// ---- Local Folder Sync Manifest (Milestone 1) ------------------------------
+
+export const SyncManifestEntrySchema = z.object({
+  /** Virtual IndexedDB path relative to `projects/{projectId}/` (e.g. `Artifacts/chapter-chapter-1.md`). */
+  idbPath: z.string(),
+  /** Disk path relative to the linked project folder root (e.g. `chapters/01-chapter-1.md`). */
+  diskPath: z.string(),
+  /** Hash of the content at last completed sync. */
+  baseHash: z.string(),
+  /** ISO timestamp from IDB / project metadata at last completed sync. */
+  baseIdbUpdatedAt: z.string(),
+  /** File.lastModified (epoch ms) on disk at last completed sync. */
+  baseDiskMtimeMs: z.number(),
+});
+
+export type SyncManifestEntry = z.infer<typeof SyncManifestEntrySchema>;
+
+export const SyncManifestSchema = z.object({
+  schemaVersion: z.literal(1),
+  projectId: z.string(),
+  folderName: z.string(),
+  lastSyncedAt: z.string(),
+  entries: z.record(z.string(), SyncManifestEntrySchema).default({}), // keyed by idbPath
+});
+
+export type SyncManifest = z.infer<typeof SyncManifestSchema>;
+
