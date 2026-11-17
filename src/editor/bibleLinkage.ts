@@ -7,26 +7,40 @@ export interface BibleLinkageOptions {
   characters: any[];
   locations: any[];
   items: any[];
+  worldRules: any[];
   enabled: boolean;
 }
 
 declare module '@tiptap/core' {
   interface Commands<ReturnType> {
     bibleLinkage: {
-      updateBibleLinkage: (config: { characters: any[]; locations: any[]; items: any[]; enabled: boolean }) => ReturnType;
-    }
+      updateBibleLinkage: (config: {
+        characters: any[];
+        locations: any[];
+        items: any[];
+        worldRules?: any[];
+        enabled: boolean;
+      }) => ReturnType;
+    };
   }
 }
 
 export const bibleLinkagePluginKey = new PluginKey('bibleLinkage');
 
-function findBibleMatches(doc: any, characters: any[], locations: any[], items: any[], enabled: boolean) {
+function findBibleMatches(
+  doc: any,
+  characters: any[],
+  locations: any[],
+  items: any[],
+  worldRules: any[],
+  enabled: boolean
+) {
   if (!enabled) return DecorationSet.empty;
-  
+
   const decos: Decoration[] = [];
-  const matchers: { text: string; className: string; color?: string }[] = [];
-  
-  characters.forEach(char => {
+  const matchers: { text: string; className: string; color?: string; caseInsensitive?: boolean }[] = [];
+
+  characters.forEach((char) => {
     if (char.name && char.name.trim()) {
       matchers.push({ text: char.name.trim(), className: 'character-highlight', color: char.color });
     }
@@ -39,7 +53,7 @@ function findBibleMatches(doc: any, characters: any[], locations: any[], items: 
     }
   });
 
-  locations.forEach(loc => {
+  locations.forEach((loc) => {
     if (loc.name && loc.name.trim()) {
       matchers.push({ text: loc.name.trim(), className: 'location-highlight', color: loc.color });
     }
@@ -52,7 +66,7 @@ function findBibleMatches(doc: any, characters: any[], locations: any[], items: 
     }
   });
 
-  items.forEach(item => {
+  items.forEach((item) => {
     if (item.name && item.name.trim()) {
       matchers.push({ text: item.name.trim(), className: 'item-highlight', color: item.color });
     }
@@ -61,6 +75,29 @@ function findBibleMatches(doc: any, characters: any[], locations: any[], items: 
         if (alias && alias.trim()) {
           matchers.push({ text: alias.trim(), className: 'item-highlight', color: item.color });
         }
+      });
+    }
+  });
+
+  (worldRules || []).forEach((rule) => {
+    if (Array.isArray(rule.keywords)) {
+      rule.keywords.forEach((kw: string) => {
+        if (kw && kw.trim()) {
+          matchers.push({
+            text: kw.trim(),
+            className: 'rule-highlight',
+            color: rule.color,
+            caseInsensitive: true,
+          });
+        }
+      });
+    }
+    if (rule.title && rule.title.trim()) {
+      matchers.push({
+        text: rule.title.trim(),
+        className: 'rule-highlight',
+        color: rule.color,
+        caseInsensitive: true,
       });
     }
   });
@@ -74,17 +111,17 @@ function findBibleMatches(doc: any, characters: any[], locations: any[], items: 
     if (node.isText) {
       const text = node.text || '';
       const matchedIndices = new Array(text.length).fill(false);
-      
-      matchers.forEach(matcher => {
+
+      matchers.forEach((matcher) => {
         const escaped = matcher.text.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-        // Word boundary, case-sensitive
-        const regex = new RegExp(`\\b${escaped}\\b`, 'g');
-        
+        const flags = matcher.caseInsensitive ? 'gi' : 'g';
+        const regex = new RegExp(`\\b${escaped}\\b`, flags);
+
         let match;
         while ((match = regex.exec(text)) !== null) {
           const startIdx = match.index;
           const endIdx = match.index + match[0].length;
-          
+
           let alreadyMatched = false;
           for (let i = startIdx; i < endIdx; i++) {
             if (matchedIndices[i]) {
@@ -92,15 +129,13 @@ function findBibleMatches(doc: any, characters: any[], locations: any[], items: 
               break;
             }
           }
-          
+
           if (!alreadyMatched) {
             for (let i = startIdx; i < endIdx; i++) {
               matchedIndices[i] = true;
             }
-            
-            const style = matcher.color
-              ? `border-bottom: 2px dotted ${matcher.color};`
-              : undefined;
+
+            const style = matcher.color ? `border-bottom: 2px dotted ${matcher.color};` : undefined;
 
             decos.push(
               Decoration.inline(pos + startIdx, pos + endIdx, {
@@ -109,7 +144,7 @@ function findBibleMatches(doc: any, characters: any[], locations: any[], items: 
               })
             );
           }
-          
+
           if (match.index === regex.lastIndex) {
             regex.lastIndex++;
           }
@@ -130,13 +165,14 @@ export const BibleLinkage = Extension.create<BibleLinkageOptions>({
       characters: [],
       locations: [],
       items: [],
+      worldRules: [],
       enabled: true,
     };
   },
 
   addProseMirrorPlugins() {
     const extension = this;
-    
+
     return [
       new Plugin({
         key: bibleLinkagePluginKey,
@@ -146,19 +182,21 @@ export const BibleLinkage = Extension.create<BibleLinkageOptions>({
               characters: extension.options.characters || [],
               locations: extension.options.locations || [],
               items: extension.options.items || [],
+              worldRules: extension.options.worldRules || [],
               enabled: extension.options.enabled !== false,
               decorations: DecorationSet.empty,
             };
           },
           apply(tr, value, oldState, newState) {
             const meta = tr.getMeta(bibleLinkagePluginKey);
-            let { characters, locations, items, enabled } = value;
+            let { characters, locations, items, worldRules, enabled } = value;
             let forceUpdate = false;
 
             if (meta) {
               if (meta.characters !== undefined) characters = meta.characters;
               if (meta.locations !== undefined) locations = meta.locations;
               if (meta.items !== undefined) items = meta.items;
+              if (meta.worldRules !== undefined) worldRules = meta.worldRules;
               if (meta.enabled !== undefined) enabled = meta.enabled;
               forceUpdate = true;
             }
@@ -166,11 +204,19 @@ export const BibleLinkage = Extension.create<BibleLinkageOptions>({
             const docChanged = tr.docChanged;
 
             if (docChanged || forceUpdate) {
-              const decorations = findBibleMatches(newState.doc, characters, locations, items, enabled);
+              const decorations = findBibleMatches(
+                newState.doc,
+                characters,
+                locations,
+                items,
+                worldRules,
+                enabled
+              );
               return {
                 characters,
                 locations,
                 items,
+                worldRules,
                 enabled,
                 decorations,
               };
@@ -190,12 +236,20 @@ export const BibleLinkage = Extension.create<BibleLinkageOptions>({
 
   addCommands() {
     return {
-      updateBibleLinkage: (config: { characters: any[]; locations: any[]; items: any[]; enabled: boolean }) => ({ tr, dispatch }) => {
-        if (dispatch) {
-          tr.setMeta(bibleLinkagePluginKey, config);
-        }
-        return true;
-      },
+      updateBibleLinkage:
+        (config: {
+          characters: any[];
+          locations: any[];
+          items: any[];
+          worldRules?: any[];
+          enabled: boolean;
+        }) =>
+        ({ tr, dispatch }) => {
+          if (dispatch) {
+            tr.setMeta(bibleLinkagePluginKey, config);
+          }
+          return true;
+        },
     };
   },
 });

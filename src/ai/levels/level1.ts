@@ -4,10 +4,20 @@ import { captureLocations } from '../actions/captureLocations';
 import { captureStyle } from '../actions/captureStyle';
 import { summarizeChapter } from '../actions/summarizeChapter';
 import { checkContinuity } from '../actions/checkContinuity';
+import { auditWorldRules } from '../actions/auditWorldRules';
+import { captureWorldRules } from '../actions/captureWorldRules';
 
 export const LEVEL_1: LevelModule = {
   level: 1,
   label: 'Reader',
-  blurb: 'AI reads your book — captures bible entries, summarizes, checks continuity. It never writes prose.',
-  actions: [captureCharacters, captureLocations, captureStyle, summarizeChapter, checkContinuity],
+  blurb: 'AI reads your book — captures bible entries, summarizes, checks continuity & world rules. It never writes prose.',
+  actions: [
+    captureCharacters,
+    captureLocations,
+    captureWorldRules,
+    captureStyle,
+    summarizeChapter,
+    checkContinuity,
+    auditWorldRules,
+  ],
 };

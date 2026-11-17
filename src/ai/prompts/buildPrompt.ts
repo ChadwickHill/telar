@@ -1,6 +1,6 @@
 import en from './packs/en.json';
 import vi from './packs/vi.json';
-import { Character, Location, Style } from '../../storage/schemas';
+import { Character, Location, Item, WorldRule, Style } from '../../storage/schemas';
 import { ToolContext } from '../types';
 import { stripBeatTokens } from '../beats';
 
@@ -135,6 +135,33 @@ function formatLocationBlock(loc: Location, compact = false): string {
   return parts.join('\n');
 }
 
+// Formats Item into details block
+function formatItemBlock(item: Item, compact = false): string {
+  if (compact) {
+    return `- ${item.name}${item.description ? `: ${item.description}` : ''}`;
+  }
+  const parts = [];
+  parts.push(`- Item: ${item.name}`);
+  if (item.aliases && item.aliases.length > 0) parts.push(`  Aliases: ${item.aliases.join(', ')}`);
+  if (item.description) parts.push(`  Description: ${item.description}`);
+  if (item.significance) parts.push(`  Significance: ${item.significance}`);
+  if (item.notes) parts.push(`  Notes: ${item.notes}`);
+  return parts.join('\n');
+}
+
+// Formats WorldRule into constraint block
+function formatWorldRuleBlock(rule: WorldRule, compact = false): string {
+  const tag = rule.severity === 'hard' ? '[HARD RULE]' : '[SOFT RULE]';
+  if (compact) {
+    return `- ${tag} ${rule.title} (${rule.category}): ${rule.statement}`;
+  }
+  const parts = [];
+  parts.push(`- ${tag} ${rule.title} (${rule.category})`);
+  if (rule.statement) parts.push(`  Constraint: ${rule.statement}`);
+  if (rule.exceptions) parts.push(`  Exceptions: ${rule.exceptions}`);
+  return parts.join('\n');
+}
+
 export async function buildEditorPrompt(
   toolId: 'fix_grammar' | 'rephrase' | 'shorten' | 'polish_dialogue' | 'vivid_detail' | 'write_beat' | 'continue',
   input: {
@@ -232,6 +259,49 @@ export async function buildEditorPrompt(
     return false;
   });
 
+  // 6b. Item block
+  let itemsList: Item[] = [];
+  try {
+    const raw = await ctx.storage.readFile(`${ctx.prefix}Items.json`);
+    if (raw) {
+      itemsList = (JSON.parse(raw).items || []) as Item[];
+    }
+  } catch {
+    // ignore
+  }
+  const matchedItems = itemsList.filter((it) => {
+    if (it.name && textToSearch.includes(it.name.toLowerCase())) return true;
+    if (Array.isArray(it.aliases)) {
+      return it.aliases.some((alias) => alias && textToSearch.includes(alias.toLowerCase()));
+    }
+    return false;
+  });
+
+  // 6c. World Rules block (alwaysActive OR keyword/title match; sorted so alwaysActive & hard come first)
+  let worldRulesList: WorldRule[] = [];
+  try {
+    const raw = await ctx.storage.readFile(`${ctx.prefix}WorldRules.json`);
+    if (raw) {
+      worldRulesList = (JSON.parse(raw).rules || []) as WorldRule[];
+    }
+  } catch {
+    // ignore
+  }
+  const selectedRules = worldRulesList
+    .filter((rule) => {
+      if (rule.alwaysActive) return true;
+      if (rule.title && textToSearch.includes(rule.title.toLowerCase())) return true;
+      if (Array.isArray(rule.keywords)) {
+        return rule.keywords.some((kw) => kw.trim() && textToSearch.includes(kw.trim().toLowerCase()));
+      }
+      return false;
+    })
+    .sort((a, b) => {
+      const aScore = (a.alwaysActive ? 2 : 0) + (a.severity === 'hard' ? 1 : 0);
+      const bScore = (b.alwaysActive ? 2 : 0) + (b.severity === 'hard' ? 1 : 0);
+      return bScore - aScore;
+    });
+
   // 7. Continuity block
   let continuityBlock = '';
   let hasContinuity = false;
@@ -281,9 +351,14 @@ export async function buildEditorPrompt(
     return block;
   };
 
-  const getEntityBlock = (compact: boolean) => {
+  const getEntityBlock = (compact: boolean, priorityRulesOnly = false) => {
     const charParts = matchedChars.map(c => formatCharacterBlock(c, compact));
     const locParts = matchedLocs.map(l => formatLocationBlock(l, compact));
+    const itemParts = matchedItems.map(it => formatItemBlock(it, compact));
+    const activeRuleSlice = priorityRulesOnly
+      ? selectedRules.filter(r => r.severity === 'hard' || r.alwaysActive)
+      : selectedRules;
+    const ruleParts = activeRuleSlice.map(r => formatWorldRuleBlock(r, compact));
     
     let cBlock = '';
     if (charParts.length > 0) {
@@ -294,17 +369,33 @@ export async function buildEditorPrompt(
     if (locParts.length > 0) {
       lBlock = `=== LOCATION BIBLE ===\n${locParts.join('\n\n')}`;
     }
+
+    let iBlock = '';
+    if (itemParts.length > 0) {
+      iBlock = `=== ITEM BIBLE ===\n${itemParts.join('\n\n')}`;
+    }
+
+    let rBlock = '';
+    if (ruleParts.length > 0) {
+      rBlock = `=== WORLD RULES & CONSTRAINTS ===\n${ruleParts.join('\n\n')}`;
+    }
     
-    return { cBlock, lBlock };
+    return { cBlock, lBlock, iBlock, rBlock };
   };
 
   // Helper to assemble full user prompt
-  const assemble = (surrounding: string, cont: string, entities: { cBlock: string; lBlock: string }) => {
+  const assemble = (
+    surrounding: string,
+    cont: string,
+    entities: { cBlock: string; lBlock: string; iBlock: string; rBlock: string }
+  ) => {
     const segments: string[] = [actionInstruction];
     if (userGuidance && toolId !== 'write_beat') segments.push(userGuidance);
     if (styleBlock) segments.push(styleBlock);
+    if (entities.rBlock) segments.push(entities.rBlock);
     if (entities.cBlock) segments.push(entities.cBlock);
     if (entities.lBlock) segments.push(entities.lBlock);
+    if (entities.iBlock) segments.push(entities.iBlock);
     if (cont) segments.push(cont);
     segments.push(surrounding);
     if (toolId !== 'write_beat' && toolId !== 'continue') {
@@ -316,7 +407,7 @@ export async function buildEditorPrompt(
 
   // Try assembling with normal parameters
   let surroundingProseText = getSurroundingProseBlock(windowLimits.before, windowLimits.after);
-  let entityBlocks = getEntityBlock(false);
+  let entityBlocks = getEntityBlock(false, false);
   let userPrompt = assemble(surroundingProseText, continuityBlock, entityBlocks);
 
   // Check budget (6000 tokens ceiling = ~22800 characters)
@@ -336,8 +427,8 @@ export async function buildEditorPrompt(
   }
 
   if (userPrompt.length > charBudget) {
-    // Trimming step 3: Summarize entity entries
-    entityBlocks = getEntityBlock(true); // compact
+    // Trimming step 3: Summarize entity entries while keeping alwaysActive & hard world rules
+    entityBlocks = getEntityBlock(true, true); // compact + priority rules
     userPrompt = assemble(surroundingProseText, '', entityBlocks);
   }
 

@@ -342,7 +342,29 @@
   "corkboardJumpTo": "Đi tới",
   "corkboardEmptyTitle": "Bảng ghim ý tưởng đang trống",
   "corkboardEmptyDesc": "Thêm thẻ Ý tưởng, Cảnh truyện, Nhân vật, Địa điểm, Quy tắc thế giới hoặc Tuyến truyện ở trên, kéo để sắp xếp và nối các tuyến cốt truyện.",
-  "corkboardPromotedToast": "Đã chuyển thẻ thành"
+  "corkboardPromotedToast": "Đã chuyển thẻ thành",
+  "worldRules": "Quy tắc thế giới",
+  "worldRulesTitle": "Quy tắc & Vật lý Thế giới",
+  "noWorldRulesYet": "Chưa có quy tắc nào. Hãy thêm định luật vật lý, giới hạn công nghệ hoặc ràng buộc để giữ mạch truyện nhất quán.",
+  "worldRuleTitlePlaceholder": "Tên quy tắc...",
+  "worldRuleCategory": "Phân loại",
+  "worldRuleCatOrbital": "Quỹ đạo & Lực đẩy",
+  "worldRuleCatThermodynamics": "Nhiệt động lực học",
+  "worldRuleCatCommsLatency": "Liên lạc & Độ trễ",
+  "worldRuleCatBiology": "Sinh học & Duy trì sự sống",
+  "worldRuleCatSociety": "Xã hội & Công nghệ",
+  "worldRuleCatOther": "Khác",
+  "worldRuleSeverity": "Mức độ",
+  "worldRuleSeverityHard": "Quy luật cứng",
+  "worldRuleSeveritySoft": "Nguyên tắc mềm",
+  "worldRuleAlwaysActive": "Luôn kích hoạt trong mọi cảnh",
+  "worldRuleAlwaysActiveHint": "Được đưa vào gợi ý viết và kiểm tra ngay cả khi từ khóa không xuất hiện.",
+  "worldRuleKeywords": "Từ khóa kích hoạt (cách nhau bằng dấu phẩy)",
+  "worldRuleKeywordsPlaceholder": "vd: epstein, tàu đẩy, độ trễ ánh sáng, bộ tản nhiệt",
+  "worldRuleStatement": "Nội dung Quy tắc & Ràng buộc",
+  "worldRuleStatementPlaceholder": "Mô tả rõ quy luật bất biến...",
+  "worldRuleExceptions": "Ngoại lệ / Trường hợp đặc biệt (Tùy chọn)",
+  "worldRuleExceptionsPlaceholder": "Các ngoại lệ hoặc chế độ hỏng hóc...",
+  "worldRuleEvidence": "Bằng chứng trong bản thảo",
+  "worldRuleAuditBtn": "Kiểm tra Quy tắc Thế giới"
 }
-
-

@@ -1,12 +1,22 @@
-import React, { useState } from 'react';
-import { Users, MapPin, Feather, Compass, Plus, Trash2, Box, Upload, Image } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Users, MapPin, Feather, Compass, Plus, Trash2, Box, Upload, Atom } from 'lucide-react';
 import { useTranslation } from '../i18n/useTranslation';
-import { Character, Location, Item, Style } from '../storage/schemas';
+import {
+  Character,
+  Location,
+  Item,
+  WorldRule,
+  WorldRuleCategory,
+  Style,
+} from '../storage/schemas';
+
+export type BibleTabId = 'characters' | 'locations' | 'items' | 'rules' | 'style' | 'continuity';
 
 interface BibleWorkspaceProps {
   characters: { schemaVersion: 1; characters: Character[] };
   locations: { schemaVersion: 1; locations: Location[] };
   items: { schemaVersion: 1; items: Item[] };
+  worldRules: { schemaVersion: 1; rules: WorldRule[] };
   style: Style;
   continuityList: Record<string, string>; // chapterId -> markdown
   chapters: { id: string; title: string }[];
@@ -14,24 +24,28 @@ interface BibleWorkspaceProps {
   onUpdateCharacters: (chars: Character[]) => void;
   onUpdateLocations: (locs: Location[]) => void;
   onUpdateItems: (items: Item[]) => void;
+  onUpdateWorldRules: (rules: WorldRule[]) => void;
   onUpdateStyle: (style: Style) => void;
   onUpdateContinuity: (chapterId: string, content: string) => void;
   
   // Lifted selection states for story bible quick-nav
-  bibleTab?: 'characters' | 'locations' | 'items' | 'style' | 'continuity';
-  onChangeBibleTab?: (tab: 'characters' | 'locations' | 'items' | 'style' | 'continuity') => void;
+  bibleTab?: BibleTabId;
+  onChangeBibleTab?: (tab: BibleTabId) => void;
   selectedCharId?: string | null;
   onSelectChar?: (id: string | null) => void;
   selectedLocId?: string | null;
   onSelectLoc?: (id: string | null) => void;
   selectedItemId?: string | null;
   onSelectItem?: (id: string | null) => void;
+  selectedRuleId?: string | null;
+  onSelectRule?: (id: string | null) => void;
 }
 
 export default function BibleWorkspace({
   characters,
   locations,
   items,
+  worldRules,
   style,
   continuityList,
   chapters,
@@ -39,6 +53,7 @@ export default function BibleWorkspace({
   onUpdateCharacters,
   onUpdateLocations,
   onUpdateItems,
+  onUpdateWorldRules,
   onUpdateStyle,
   onUpdateContinuity,
   bibleTab: propBibleTab,
@@ -49,14 +64,17 @@ export default function BibleWorkspace({
   onSelectLoc,
   selectedItemId: propSelectedItemId,
   onSelectItem,
+  selectedRuleId: propSelectedRuleId,
+  onSelectRule,
 }: BibleWorkspaceProps) {
   const { t } = useTranslation();
-  const [localActiveTab, setLocalActiveTab] = useState<'characters' | 'locations' | 'items' | 'style' | 'continuity'>('characters');
+  const [localActiveTab, setLocalActiveTab] = useState<BibleTabId>('characters');
 
   // Active item selection
   const [localSelectedCharId, setLocalSelectedCharId] = useState<string | null>(null);
   const [localSelectedLocId, setLocalSelectedLocId] = useState<string | null>(null);
   const [localSelectedItemId, setLocalSelectedItemId] = useState<string | null>(null);
+  const [localSelectedRuleId, setLocalSelectedRuleId] = useState<string | null>(null);
 
   const activeTab = propBibleTab !== undefined ? propBibleTab : localActiveTab;
   const setActiveTab = onChangeBibleTab !== undefined ? onChangeBibleTab : setLocalActiveTab;
@@ -69,6 +87,9 @@ export default function BibleWorkspace({
 
   const selectedItemId = propSelectedItemId !== undefined ? propSelectedItemId : localSelectedItemId;
   const setSelectedItemId = onSelectItem !== undefined ? onSelectItem : setLocalSelectedItemId;
+
+  const selectedRuleId = propSelectedRuleId !== undefined ? propSelectedRuleId : localSelectedRuleId;
+  const setSelectedRuleId = onSelectRule !== undefined ? onSelectRule : setLocalSelectedRuleId;
 
   const handleAvatarChange = <T extends object>(
     e: React.ChangeEvent<HTMLInputElement>,
@@ -157,6 +178,48 @@ export default function BibleWorkspace({
     if (selectedItemId === id) setSelectedItemId(null);
   };
 
+  // World Rules logic
+  const handleAddRule = () => {
+    const newRule: WorldRule = {
+      id: `rule-${Date.now()}`,
+      title: 'New World Rule',
+      category: 'other',
+      severity: 'hard',
+      statement: '',
+      alwaysActive: true,
+      keywords: [],
+      evidence: [],
+    };
+    onUpdateWorldRules([...worldRules.rules, newRule]);
+    setSelectedRuleId(newRule.id);
+  };
+
+  const handleUpdateRule = (updated: WorldRule) => {
+    onUpdateWorldRules(worldRules.rules.map((r) => (r.id === updated.id ? updated : r)));
+  };
+
+  const handleDeleteRule = (id: string) => {
+    onUpdateWorldRules(worldRules.rules.filter((r) => r.id !== id));
+    if (selectedRuleId === id) setSelectedRuleId(null);
+  };
+
+  const getRuleCategoryLabel = (cat: WorldRuleCategory) => {
+    switch (cat) {
+      case 'orbital-propulsion':
+        return t('worldRuleCatOrbital');
+      case 'thermodynamics':
+        return t('worldRuleCatThermodynamics');
+      case 'comms-latency':
+        return t('worldRuleCatCommsLatency');
+      case 'biology-life-support':
+        return t('worldRuleCatBiology');
+      case 'society-tech':
+        return t('worldRuleCatSociety');
+      default:
+        return t('worldRuleCatOther');
+    }
+  };
+
   // Previous Chapter Continuity Calculation
   const activeChapterIndex = chapters.findIndex((c) => c.id === activeChapterId);
   const prevChapter = activeChapterIndex > 0 ? chapters[activeChapterIndex - 1] : null;
@@ -166,6 +229,14 @@ export default function BibleWorkspace({
   const activeChar = characters.characters.find((c) => c.id === selectedCharId) || null;
   const activeLoc = locations.locations.find((l) => l.id === selectedLocId) || null;
   const activeItem = items.items.find((i) => i.id === selectedItemId) || null;
+  const activeRule = worldRules.rules.find((r) => r.id === selectedRuleId) || null;
+
+  const [keywordsDraft, setKeywordsDraft] = useState('');
+  useEffect(() => {
+    setKeywordsDraft(activeRule ? activeRule.keywords.join(', ') : '');
+    // Sync draft only when switching selected rule ID
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedRuleId]);
 
   return (
     <div className="flex flex-col h-full bg-[var(--background)] select-none">
@@ -203,6 +274,17 @@ export default function BibleWorkspace({
         >
           <Box size={16} />
           {t('items')}
+        </button>
+        <button
+          onClick={() => setActiveTab('rules')}
+          className={`flex items-center gap-2 px-5 py-3 border-b-2 text-sm font-medium transition-all whitespace-nowrap ${
+            activeTab === 'rules'
+              ? 'border-[var(--accent)] text-[var(--accent)]'
+              : 'border-transparent text-[var(--foreground)] opacity-70 hover:opacity-100'
+          }`}
+        >
+          <Atom size={16} />
+          {t('worldRules')}
         </button>
         <button
           onClick={() => setActiveTab('style')}
@@ -788,6 +870,265 @@ export default function BibleWorkspace({
                 </div>
               ) : (
                 <div className="text-center text-sm opacity-50 p-12">{t('noItemsYet')}</div>
+              )}
+            </div>
+          </>
+        )}
+
+        {activeTab === 'rules' && (
+          <>
+            {/* Sidebar list */}
+            <div className="w-72 border-r border-[var(--border)] bg-[var(--sidebar-bg)] flex flex-col">
+              <div className="p-3 border-b border-[var(--border)] flex justify-between items-center">
+                <span className="text-xs uppercase tracking-wider opacity-60 font-semibold">{t('worldRulesTitle')}</span>
+                <button
+                  onClick={handleAddRule}
+                  className="p-1 rounded bg-[var(--accent)] text-white hover:opacity-90 cursor-pointer"
+                  title="Add World Rule"
+                >
+                  <Plus size={14} />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                {worldRules.rules.map((r) => (
+                  <div
+                    key={r.id}
+                    onClick={() => setSelectedRuleId(r.id)}
+                    className={`p-2 rounded-lg cursor-pointer transition-all flex items-center justify-between group gap-2 ${
+                      selectedRuleId === r.id
+                        ? 'bg-[var(--accent-light)] text-[var(--accent)] font-medium'
+                        : 'hover:bg-[var(--border)] text-[var(--foreground)]'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2 min-w-0 flex-1">
+                      <span
+                        className={`mt-0.5 text-[9px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0 ${
+                          r.severity === 'hard'
+                            ? 'bg-red-500/15 text-red-700 dark:text-red-300'
+                            : 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                        }`}
+                      >
+                        {r.severity === 'hard' ? 'HARD' : 'SOFT'}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          {r.color && (
+                            <span
+                              className="w-2 h-2 rounded-full shrink-0"
+                              style={{ backgroundColor: r.color }}
+                            />
+                          )}
+                          <span className="truncate text-sm">{r.title}</span>
+                        </div>
+                        <div className="text-[10px] opacity-55 truncate">
+                          {getRuleCategoryLabel(r.category)}
+                          {r.alwaysActive ? ' · Always' : ''}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteRule(r.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 hover:text-red-500 p-0.5 transition-opacity shrink-0"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Details panel */}
+            <div className="flex-1 overflow-y-auto p-6 bg-white dark:bg-[#1f1f1e]">
+              {activeRule ? (
+                <div className="max-w-2xl space-y-5">
+                  <div className="flex justify-between items-center gap-3">
+                    <input
+                      type="text"
+                      value={activeRule.title}
+                      onChange={(e) => handleUpdateRule({ ...activeRule, title: e.target.value })}
+                      placeholder={t('worldRuleTitlePlaceholder')}
+                      className="text-2xl font-bold border-b border-transparent focus:border-[var(--accent)] focus:outline-none w-full bg-transparent text-[var(--foreground)] pb-1"
+                    />
+                    <button
+                      onClick={() => handleDeleteRule(activeRule.id)}
+                      className="text-red-500 hover:text-red-700 flex items-center gap-1 text-sm font-medium shrink-0 ml-2 cursor-pointer"
+                    >
+                      <Trash2 size={14} /> {t('delete')}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs uppercase opacity-75 mb-1">{t('worldRuleCategory')}</label>
+                      <select
+                        value={activeRule.category}
+                        onChange={(e) =>
+                          handleUpdateRule({
+                            ...activeRule,
+                            category: e.target.value as WorldRuleCategory,
+                          })
+                        }
+                        className="w-full px-3 py-1.5 rounded-md border border-[var(--border)] bg-transparent text-[var(--foreground)] text-sm focus:outline-none focus:border-[var(--accent)]"
+                      >
+                        <option value="orbital-propulsion">{t('worldRuleCatOrbital')}</option>
+                        <option value="thermodynamics">{t('worldRuleCatThermodynamics')}</option>
+                        <option value="comms-latency">{t('worldRuleCatCommsLatency')}</option>
+                        <option value="biology-life-support">{t('worldRuleCatBiology')}</option>
+                        <option value="society-tech">{t('worldRuleCatSociety')}</option>
+                        <option value="other">{t('worldRuleCatOther')}</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs uppercase opacity-75 mb-1">{t('worldRuleSeverity')}</label>
+                      <div className="grid grid-cols-2 gap-1 p-0.5 rounded-md border border-[var(--border)] bg-[var(--sidebar-bg)]">
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateRule({ ...activeRule, severity: 'hard' })}
+                          className={`px-2 py-1 rounded text-xs font-semibold transition-all cursor-pointer ${
+                            activeRule.severity === 'hard'
+                              ? 'bg-red-600 text-white shadow-xs'
+                              : 'text-[var(--foreground)] opacity-70 hover:opacity-100'
+                          }`}
+                        >
+                          {t('worldRuleSeverityHard')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateRule({ ...activeRule, severity: 'soft' })}
+                          className={`px-2 py-1 rounded text-xs font-semibold transition-all cursor-pointer ${
+                            activeRule.severity === 'soft'
+                              ? 'bg-amber-600 text-white shadow-xs'
+                              : 'text-[var(--foreground)] opacity-70 hover:opacity-100'
+                          }`}
+                        >
+                          {t('worldRuleSeveritySoft')}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs uppercase opacity-75 mb-1">{t('highlightColor')}</label>
+                      <div className="flex items-center gap-2">
+                        <div className="relative w-8 h-8 rounded border border-[var(--border)] overflow-hidden shrink-0 shadow-sm bg-white dark:bg-zinc-800">
+                          <input
+                            type="color"
+                            value={activeRule.color || '#f59e0b'}
+                            onChange={(e) => handleUpdateRule({ ...activeRule, color: e.target.value })}
+                            className="absolute inset-0 w-full h-full p-0 border-0 cursor-pointer scale-150"
+                          />
+                        </div>
+                        <span className="text-xs font-mono opacity-80 uppercase">{activeRule.color || 'Default'}</span>
+                        {activeRule.color && (
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateRule({ ...activeRule, color: undefined })}
+                            className="text-xs text-[var(--accent)] hover:underline ml-1 cursor-pointer"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-start gap-2.5 p-3 rounded-lg border border-[var(--border)] bg-[var(--sidebar-bg)]">
+                    <input
+                      id="world-rule-always-active"
+                      type="checkbox"
+                      checked={activeRule.alwaysActive}
+                      onChange={(e) => handleUpdateRule({ ...activeRule, alwaysActive: e.target.checked })}
+                      className="mt-0.5 accent-[var(--accent)] cursor-pointer"
+                    />
+                    <label htmlFor="world-rule-always-active" className="cursor-pointer">
+                      <span className="block text-xs font-semibold text-[var(--foreground)]">
+                        {t('worldRuleAlwaysActive')}
+                      </span>
+                      <span className="block text-[11px] opacity-65 mt-0.5">
+                        {t('worldRuleAlwaysActiveHint')}
+                      </span>
+                    </label>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs uppercase opacity-75 mb-1">{t('worldRuleKeywords')}</label>
+                    <input
+                      type="text"
+                      value={keywordsDraft}
+                      onChange={(e) => {
+                        const rawVal = e.target.value;
+                        setKeywordsDraft(rawVal);
+                        handleUpdateRule({
+                          ...activeRule,
+                          keywords: rawVal
+                            .split(',')
+                            .map((s) => s.trim())
+                            .filter(Boolean),
+                        });
+                      }}
+                      placeholder={t('worldRuleKeywordsPlaceholder')}
+                      className="w-full px-3 py-1.5 rounded-md border border-[var(--border)] bg-transparent text-[var(--foreground)] text-sm focus:outline-none focus:border-[var(--accent)]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs uppercase opacity-75 mb-1">{t('worldRuleStatement')}</label>
+                    <textarea
+                      value={activeRule.statement}
+                      onChange={(e) => handleUpdateRule({ ...activeRule, statement: e.target.value })}
+                      rows={4}
+                      placeholder={t('worldRuleStatementPlaceholder')}
+                      className="w-full px-3 py-2 rounded-md border border-[var(--border)] bg-transparent text-[var(--foreground)] text-sm focus:outline-none focus:border-[var(--accent)]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs uppercase opacity-75 mb-1">{t('worldRuleExceptions')}</label>
+                    <textarea
+                      value={activeRule.exceptions || ''}
+                      onChange={(e) => handleUpdateRule({ ...activeRule, exceptions: e.target.value })}
+                      rows={3}
+                      placeholder={t('worldRuleExceptionsPlaceholder')}
+                      className="w-full px-3 py-2 rounded-md border border-[var(--border)] bg-transparent text-[var(--foreground)] text-sm focus:outline-none focus:border-[var(--accent)]"
+                    />
+                  </div>
+
+                  {activeRule.evidence && activeRule.evidence.length > 0 && (
+                    <div>
+                      <label className="block text-xs uppercase opacity-75 mb-2">{t('worldRuleEvidence')}</label>
+                      <div className="space-y-2">
+                        {activeRule.evidence.map((ev, idx) => (
+                          <div
+                            key={`${ev.chapterId}-${idx}`}
+                            className="p-2.5 rounded border border-[var(--border)] bg-[var(--sidebar-bg)] text-xs flex items-start justify-between gap-2"
+                          >
+                            <div>
+                              <p className="italic text-[var(--foreground)]">&ldquo;{ev.quote}&rdquo;</p>
+                              <span className="text-[10px] opacity-55 font-mono">{ev.chapterId}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleUpdateRule({
+                                  ...activeRule,
+                                  evidence: activeRule.evidence.filter((_, i) => i !== idx),
+                                })
+                              }
+                              className="opacity-50 hover:opacity-100 hover:text-red-500 p-0.5 shrink-0 cursor-pointer"
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="text-center text-sm opacity-50 p-12">{t('noWorldRulesYet')}</div>
               )}
             </div>
           </>

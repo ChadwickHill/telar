@@ -293,4 +293,41 @@ export const CorkboardSchema = z.object({
 
 export type Corkboard = z.infer<typeof CorkboardSchema>;
 
+// ---- World Rules & Physics (Milestone 3) -----------------------------------
 
+export const WorldRuleCategorySchema = z.enum([
+  'orbital-propulsion',
+  'thermodynamics',
+  'comms-latency',
+  'biology-life-support',
+  'society-tech',
+  'other',
+]);
+
+export type WorldRuleCategory = z.infer<typeof WorldRuleCategorySchema>;
+
+export const WorldRuleSeveritySchema = z.enum(['hard', 'soft']);
+
+export type WorldRuleSeverity = z.infer<typeof WorldRuleSeveritySchema>;
+
+export const WorldRuleSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  category: WorldRuleCategorySchema.default('other'),
+  severity: WorldRuleSeveritySchema.default('hard'),
+  statement: z.string().default(''),
+  exceptions: z.string().optional(),
+  alwaysActive: z.boolean().default(true),
+  keywords: z.array(z.string()).default([]),
+  evidence: z.array(EvidenceSchema).default([]),
+  color: z.string().optional(),
+});
+
+export type WorldRule = z.infer<typeof WorldRuleSchema>;
+
+export const WorldRulesSchema = z.object({
+  schemaVersion: z.literal(1),
+  rules: z.array(WorldRuleSchema).default([]),
+});
+
+export type WorldRules = z.infer<typeof WorldRulesSchema>;

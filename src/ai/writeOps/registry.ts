@@ -8,12 +8,16 @@ import { appendContinuity } from './appendContinuity';
 import { continuitySet } from './continuitySet';
 import { replaceRangeOp } from './replaceRange';
 import { insertBeatOp } from './insertBeat';
+import { worldRuleAdd } from './worldRuleAdd';
+import { worldRuleUpdate } from './worldRuleUpdate';
 
 export const ALL_WRITE_OPS: readonly WriteOp[] = Object.freeze([
   characterAdd,
   characterUpdate,
   locationAdd,
   locationUpdate,
+  worldRuleAdd,
+  worldRuleUpdate,
   styleSet,
   appendContinuity,
   continuitySet,

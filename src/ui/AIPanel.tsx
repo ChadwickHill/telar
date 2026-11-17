@@ -1,10 +1,11 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
-import { Sparkles, Bot, Loader2, AlertTriangle, Check, Send, CheckCircle2, ChevronDown, FileText, TextSelect, Maximize2, Minimize2 } from 'lucide-react';
+import { Sparkles, Bot, Loader2, AlertTriangle, Check, Send, CheckCircle2, ChevronDown, FileText, TextSelect, Maximize2, Minimize2, Atom } from 'lucide-react';
 import { WorkspaceAIConfig } from '../storage/aiConfig';
 import { actionsForLevel, findAction } from '../ai/registry';
 import { ToolResult, ProposalResult, ToolContext } from '../ai/types';
 import { findWriteOp } from '../ai/writeOps/registry';
 import { Project } from '../storage/schemas';
+import { useTranslation } from '../i18n/useTranslation';
 
 
 export interface TranscriptCard {
@@ -93,6 +94,7 @@ export default function AIPanel({
   activeBeatData,
   getBeatSurroundingText,
 }: AIPanelProps) {
+  const { t: uiT } = useTranslation();
   const [scope, setScope] = useState<'chapter' | 'selection'>('chapter');
   const [localSelectedActionId, setLocalSelectedActionId] = useState<string>('');
   
@@ -348,6 +350,77 @@ export default function AIPanel({
     } catch (err) {
       const e = err as Error;
       updateTurn(turn.id, {
+        status: 'error',
+        error: e?.message || String(err),
+      });
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleQuickAuditWorldRules() {
+    if (submitting || workspaceAI.level < 1 || !hasReadyProvider || !hasProject) return;
+    const action = findAction('audit_world_rules');
+    if (!action) return;
+
+    const chapterId = activeChapterId || '';
+    const input = {
+      selection: { text: activeChapterMarkdown || '' },
+      chapterId,
+      params: {},
+    };
+
+    setSubmitting(true);
+    const turnId = `turn-${Date.now()}`;
+    const newTurn: TranscriptTurn = {
+      id: turnId,
+      actionId: 'audit_world_rules',
+      actionLabel: action.label,
+      scope: 'chapter',
+      scopeLabel: getChapterLabel() || 'Chapter',
+      model: selectedModel,
+      status: 'loading',
+      input,
+    };
+
+    setTranscript((prev) => [...prev, newTurn]);
+
+    try {
+      const chosen = modelsList.find((m) => m.id === selectedModel);
+      const modelOverride = chosen ? { providerId: chosen.providerId, model: chosen.id } : undefined;
+      const t0 = Date.now();
+      const res = await runTool('audit_world_rules', input, modelOverride);
+      const elapsedMs = Date.now() - t0;
+
+      if (!res.ok) {
+        updateTurn(turnId, {
+          status: 'error',
+          error: res.error || 'AI returned an error.',
+          reasoning: res.reasoning,
+          elapsedMs,
+        });
+        return;
+      }
+
+      const proposalResult = res.output;
+      if (!proposalResult) {
+        updateTurn(turnId, {
+          status: 'error',
+          error: 'Action returned no results.',
+        });
+        return;
+      }
+
+      updateTurn(turnId, {
+        status: 'success',
+        proposalResult,
+        cards: [],
+        reasoning: res.reasoning,
+        elapsedMs,
+      });
+    } catch (err) {
+      const e = err as Error;
+      updateTurn(turnId, {
         status: 'error',
         error: e?.message || String(err),
       });
@@ -724,10 +797,15 @@ export default function AIPanel({
                     {/* Render Report Card */}
                     {t.proposalResult.type === 'report' && (
                       <div className="space-y-2">
-                        <div className="font-bold text-[9px] uppercase tracking-wider opacity-60">Continuity Flags</div>
+                        <div className="font-bold text-[9px] uppercase tracking-wider opacity-60">
+                          {t.actionId === 'audit_world_rules' ? 'World Rule Audit Flags' : 'Continuity Flags'}
+                        </div>
                         {t.proposalResult.items.length === 0 ? (
                           <div className="p-2 bg-green-500/5 text-green-700 dark:text-green-400 text-[10px] rounded flex items-center gap-1.5">
-                            <CheckCircle2 size={12} /> No contradictions found.
+                            <CheckCircle2 size={12} />{' '}
+                            {t.actionId === 'audit_world_rules'
+                              ? 'No world rule violations found.'
+                              : 'No contradictions found.'}
                           </div>
                         ) : (
                           t.proposalResult.items.map((item, idx) => (
@@ -743,7 +821,7 @@ export default function AIPanel({
                               </div>
                               <div className="font-medium text-[var(--foreground)]">{item.statement}</div>
                               <div className="opacity-60 italic pl-2 border-l border-[var(--border)]">
-                                ⚠ Established fact: {item.conflict}
+                                ⚠ {t.actionId === 'audit_world_rules' ? 'Rule constraint:' : 'Established fact:'} {item.conflict}
                               </div>
                             </div>
                           ))
@@ -847,6 +925,95 @@ export default function AIPanel({
                                   value={getNestedArgString(card.args, 'changes', 'significance')}
                                   rows={2}
                                   onChange={(e) => updateCardNestedArgs(t.id, cardIdx, 'changes', 'significance', e.target.value)}
+                                  className="w-full p-1 bg-white dark:bg-black/20 border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[10px] resize-none"
+                                />
+                              </div>
+                            )}
+
+                            {/* world_rule_add editor */}
+                            {card.op === 'world_rule_add' && (
+                              <div className="space-y-1.5">
+                                <label className="text-[8px] uppercase tracking-wider opacity-60 font-bold">Rule Title</label>
+                                <input
+                                  type="text"
+                                  value={getArgString(card.args, 'title')}
+                                  onChange={(e) => updateCardArgs(t.id, cardIdx, 'title', e.target.value)}
+                                  className="w-full p-1 bg-white dark:bg-black/20 border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[10px]"
+                                />
+                                <div className="grid grid-cols-2 gap-1.5">
+                                  <div>
+                                    <label className="text-[8px] uppercase tracking-wider opacity-60 font-bold">Category</label>
+                                    <select
+                                      value={getArgString(card.args, 'category') || 'other'}
+                                      onChange={(e) => updateCardArgs(t.id, cardIdx, 'category', e.target.value)}
+                                      className="w-full p-1 bg-white dark:bg-black/20 border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[10px]"
+                                    >
+                                      <option value="orbital-propulsion">orbital-propulsion</option>
+                                      <option value="thermodynamics">thermodynamics</option>
+                                      <option value="comms-latency">comms-latency</option>
+                                      <option value="biology-life-support">biology-life-support</option>
+                                      <option value="society-tech">society-tech</option>
+                                      <option value="other">other</option>
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="text-[8px] uppercase tracking-wider opacity-60 font-bold">Severity</label>
+                                    <select
+                                      value={getArgString(card.args, 'severity') || 'hard'}
+                                      onChange={(e) => updateCardArgs(t.id, cardIdx, 'severity', e.target.value)}
+                                      className="w-full p-1 bg-white dark:bg-black/20 border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[10px]"
+                                    >
+                                      <option value="hard">Hard</option>
+                                      <option value="soft">Soft</option>
+                                    </select>
+                                  </div>
+                                </div>
+                                <label className="text-[8px] uppercase tracking-wider opacity-60 font-bold">Rule Statement</label>
+                                <textarea
+                                  value={getArgString(card.args, 'statement')}
+                                  rows={2}
+                                  onChange={(e) => updateCardArgs(t.id, cardIdx, 'statement', e.target.value)}
+                                  className="w-full p-1 bg-white dark:bg-black/20 border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[10px] resize-none"
+                                />
+                              </div>
+                            )}
+
+                            {/* world_rule_update editor */}
+                            {card.op === 'world_rule_update' && (
+                              <div className="space-y-1.5">
+                                <div className="grid grid-cols-2 gap-1.5">
+                                  <div>
+                                    <label className="text-[8px] uppercase tracking-wider opacity-60 font-bold">Category</label>
+                                    <select
+                                      value={getNestedArgString(card.args, 'changes', 'category') || 'other'}
+                                      onChange={(e) => updateCardNestedArgs(t.id, cardIdx, 'changes', 'category', e.target.value)}
+                                      className="w-full p-1 bg-white dark:bg-black/20 border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[10px]"
+                                    >
+                                      <option value="orbital-propulsion">orbital-propulsion</option>
+                                      <option value="thermodynamics">thermodynamics</option>
+                                      <option value="comms-latency">comms-latency</option>
+                                      <option value="biology-life-support">biology-life-support</option>
+                                      <option value="society-tech">society-tech</option>
+                                      <option value="other">other</option>
+                                    </select>
+                                  </div>
+                                  <div>
+                                    <label className="text-[8px] uppercase tracking-wider opacity-60 font-bold">Severity</label>
+                                    <select
+                                      value={getNestedArgString(card.args, 'changes', 'severity') || 'hard'}
+                                      onChange={(e) => updateCardNestedArgs(t.id, cardIdx, 'changes', 'severity', e.target.value)}
+                                      className="w-full p-1 bg-white dark:bg-black/20 border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[10px]"
+                                    >
+                                      <option value="hard">Hard</option>
+                                      <option value="soft">Soft</option>
+                                    </select>
+                                  </div>
+                                </div>
+                                <label className="text-[8px] uppercase tracking-wider opacity-60 font-bold">Statement changes</label>
+                                <textarea
+                                  value={getNestedArgString(card.args, 'changes', 'statement')}
+                                  rows={2}
+                                  onChange={(e) => updateCardNestedArgs(t.id, cardIdx, 'changes', 'statement', e.target.value)}
                                   className="w-full p-1 bg-white dark:bg-black/20 border border-[var(--border)] rounded focus:outline-none focus:border-[var(--accent)] text-[10px] resize-none"
                                 />
                               </div>
@@ -1032,6 +1199,19 @@ export default function AIPanel({
                   {scope === 'selection' ? <TextSelect size={10} /> : <FileText size={10} />}
                   {currentSelectionLabel() || (scope === 'selection' ? 'Selection' : 'Chapter')}
                 </button>
+
+                {workspaceAI.level >= 1 && !activeBeatId && (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={handleQuickAuditWorldRules}
+                    className="flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-[10px] font-semibold cursor-pointer hover:bg-amber-500/20 transition-colors disabled:opacity-50"
+                    title="One-click audit of active chapter against World Rules & Physics"
+                  >
+                    <Atom size={10} />
+                    {uiT('worldRuleAuditBtn')}
+                  </button>
+                )}
               </div>
 
               {/* Selection preview */}

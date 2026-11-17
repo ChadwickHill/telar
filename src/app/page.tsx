@@ -18,8 +18,9 @@ import {
 } from '../storage/diskSync';
 import {
   Project, Chapter, Character, Location, Item, Style,
-  CharacterSchema, LocationSchema, ItemSchema, SnapshotIndex,
-  CorkboardSchema, Corkboard, BrainstormCard, PromotedRef
+  SnapshotIndex,
+  CorkboardSchema, Corkboard, BrainstormCard, PromotedRef,
+  WorldRule, WorldRuleSchema, WorldRulesSchema
 } from '../storage/schemas';
 import { takeSnapshot } from '../storage/snapshots';
 import { runTool, executeWriteOp } from '../ai/runTool';
@@ -27,7 +28,7 @@ import { makeCallModel } from '../ai/llm/client';
 import { ToolContext, ToolResult, ProposalResult } from '../ai/types';
 import ChapterList from '../editor/ChapterList';
 import EditorCanvas, { EditorCanvasRef } from '../editor/EditorCanvas';
-import BibleWorkspace from '../bible/BibleWorkspace';
+import BibleWorkspace, { BibleTabId } from '../bible/BibleWorkspace';
 import ExportImportDialog from '../ui/ExportImportDialog';
 import SnapshotHistoryPanel from '../ui/SnapshotHistoryPanel';
 import ConfirmDialog from '../ui/ConfirmDialog';
@@ -127,12 +128,17 @@ export default function WorkspacePage() {
     schemaVersion: 1,
     items: [],
   });
+  const [worldRules, setWorldRules] = useState<{ schemaVersion: 1; rules: WorldRule[] }>({
+    schemaVersion: 1,
+    rules: [],
+  });
 
   // Lifted selection states for Story Bible quick-nav
   const [selectedCharId, setSelectedCharId] = useState<string | null>(null);
   const [selectedLocId, setSelectedLocId] = useState<string | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
-  const [bibleTab, setBibleTab] = useState<'characters' | 'locations' | 'items' | 'style' | 'continuity'>('characters');
+  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  const [bibleTab, setBibleTab] = useState<BibleTabId>('characters');
 
   const [activeSelection, setActiveSelection] = useState<{
     from: number;
@@ -349,6 +355,20 @@ export default function WorkspacePage() {
     }
     setItems(itemsData);
 
+    let worldRulesData: { schemaVersion: 1; rules: WorldRule[] } = { schemaVersion: 1, rules: [] };
+    try {
+      const rulesStr = await activeStore.readFile(`${prefix}WorldRules.json`);
+      if (rulesStr) {
+        const parsedRules = WorldRulesSchema.safeParse(JSON.parse(rulesStr));
+        if (parsedRules.success) {
+          worldRulesData = parsedRules.data;
+        }
+      }
+    } catch {
+      // ignore missing world rules file for legacy projects
+    }
+    setWorldRules(worldRulesData);
+
     // Load Corkboard
     let loadedCorkboard: Corkboard = EMPTY_CORKBOARD;
     try {
@@ -507,6 +527,7 @@ export default function WorkspacePage() {
         await store.writeFile(`${prefix}Characters.json`, JSON.stringify({ schemaVersion: 1, characters: [] }));
         await store.writeFile(`${prefix}Locations.json`, JSON.stringify({ schemaVersion: 1, locations: [] }));
         await store.writeFile(`${prefix}Items.json`, JSON.stringify({ schemaVersion: 1, items: [] }));
+        await store.writeFile(`${prefix}WorldRules.json`, JSON.stringify({ schemaVersion: 1, rules: [] }));
         await store.writeFile(`${prefix}Style.json`, JSON.stringify({
           schemaVersion: 1,
           rhythm: { avgSentenceLengthHint: '', paragraphLengthHint: '', rhythmNotes: '' },
@@ -802,6 +823,7 @@ export default function WorkspacePage() {
     await storage.writeFile(`${prefix}Characters.json`, JSON.stringify({ schemaVersion: 1, characters: [] }));
     await storage.writeFile(`${prefix}Locations.json`, JSON.stringify({ schemaVersion: 1, locations: [] }));
     await storage.writeFile(`${prefix}Items.json`, JSON.stringify({ schemaVersion: 1, items: [] }));
+    await storage.writeFile(`${prefix}WorldRules.json`, JSON.stringify({ schemaVersion: 1, rules: [] }));
     await storage.writeFile(`${prefix}Style.json`, JSON.stringify({
       schemaVersion: 1,
       rhythm: { avgSentenceLengthHint: '', paragraphLengthHint: '', rhythmNotes: '' },
@@ -1100,19 +1122,19 @@ export default function WorkspacePage() {
     } else if (target === 'world-rule') {
       const ruleId = `rule-${Date.now()}`;
       const ruleTitle = card.title.trim() || 'Untitled World Rule';
-      let existingRules: Array<Record<string, unknown>> = [];
+      let existingRules: WorldRule[] = worldRules.rules;
       try {
         const rawRules = await storage.readFile(`${prefix}WorldRules.json`);
         if (rawRules) {
-          const parsed = JSON.parse(rawRules);
-          if (Array.isArray(parsed?.rules)) {
-            existingRules = parsed.rules;
+          const parsed = WorldRulesSchema.safeParse(JSON.parse(rawRules));
+          if (parsed.success) {
+            existingRules = parsed.data.rules;
           }
         }
       } catch {
         // seed WorldRules.json
       }
-      const newRule = {
+      const newRule = WorldRuleSchema.parse({
         id: ruleId,
         title: ruleTitle,
         category: 'other',
@@ -1122,11 +1144,10 @@ export default function WorkspacePage() {
         keywords: card.tags || [],
         evidence: [],
         ...(card.color ? { color: card.color } : {}),
-      };
-      await storage.writeFile(
-        `${prefix}WorldRules.json`,
-        JSON.stringify({ schemaVersion: 1, rules: [...existingRules, newRule] })
-      );
+      });
+      const nextPayload = { schemaVersion: 1 as const, rules: [...existingRules, newRule] };
+      setWorldRules(nextPayload);
+      await storage.writeFile(`${prefix}WorldRules.json`, JSON.stringify(nextPayload));
       ref = {
         kind: 'world-rule',
         id: ruleId,
@@ -1165,8 +1186,9 @@ export default function WorkspacePage() {
       setSelectedItemId(ref.id);
       setActiveTab('bible');
     } else if (ref.kind === 'world-rule') {
+      setBibleTab('rules');
+      setSelectedRuleId(ref.id);
       setActiveTab('bible');
-      setSyncToastMsg(ref.label ? `${ref.label} (WorldRules.json)` : 'WorldRules.json');
     }
   };
 
@@ -1555,9 +1577,9 @@ export default function WorkspacePage() {
     return results;
   };
 
-  // Attach selected text as evidence to a story bible character, location, or item
+  // Attach selected text as evidence to a story bible character, location, item, or world rule
   const handleAttachEvidence = async (
-    entityType: 'characters' | 'locations' | 'items',
+    entityType: 'characters' | 'locations' | 'items' | 'rules',
     entityId: string,
     quote: string
   ) => {
@@ -1606,6 +1628,18 @@ export default function WorkspacePage() {
       });
       setItems({ schemaVersion: 1, items: updatedItems });
       await storage.writeFile(`${prefix}Items.json`, JSON.stringify({ schemaVersion: 1, items: updatedItems }));
+    } else if (entityType === 'rules') {
+      const updatedRules = worldRules.rules.map((rule) => {
+        if (rule.id === entityId) {
+          return {
+            ...rule,
+            evidence: [...(rule.evidence || []), newEvidence],
+          };
+        }
+        return rule;
+      });
+      setWorldRules({ schemaVersion: 1, rules: updatedRules });
+      await storage.writeFile(`${prefix}WorldRules.json`, JSON.stringify({ schemaVersion: 1, rules: updatedRules }));
     }
   };
 
@@ -1656,6 +1690,9 @@ export default function WorkspacePage() {
       },
       onUpdateLocations: (list) => {
         setLocations({ schemaVersion: 1, locations: list });
+      },
+      onUpdateWorldRules: (list) => {
+        setWorldRules({ schemaVersion: 1, rules: list });
       },
       onUpdateStyle: (newStyle) => {
         setStyle(newStyle);
@@ -2262,6 +2299,7 @@ export default function WorkspacePage() {
                     characters={characters.characters}
                     locations={locations.locations}
                     items={items.items}
+                    worldRules={worldRules.rules}
                     highlightBibleRefs={project.highlightBibleRefs ?? true}
                     onToggleHighlightBibleRefs={() => handleUpdateProject({ highlightBibleRefs: !(project.highlightBibleRefs ?? true) })}
                     onAttachEvidence={handleAttachEvidence}
@@ -2282,6 +2320,11 @@ export default function WorkspacePage() {
                       setActiveTab('bible');
                       setBibleTab('items');
                       setSelectedItemId(itemId);
+                    }}
+                    onOpenBibleRule={(ruleId) => {
+                      setActiveTab('bible');
+                      setBibleTab('rules');
+                      setSelectedRuleId(ruleId);
                     }}
                     onSelectionChange={setActiveSelection}
                     onBeatClick={(beatId) => {
@@ -2420,6 +2463,7 @@ export default function WorkspacePage() {
               characters={characters}
               locations={locations}
               items={items}
+              worldRules={worldRules}
               style={style}
               continuityList={continuityList}
               chapters={chapters}
@@ -2432,6 +2476,8 @@ export default function WorkspacePage() {
               onSelectLoc={setSelectedLocId}
               selectedItemId={selectedItemId}
               onSelectItem={setSelectedItemId}
+              selectedRuleId={selectedRuleId}
+              onSelectRule={setSelectedRuleId}
               onUpdateCharacters={async (c) => {
                 setCharacters({ schemaVersion: 1, characters: c });
                 const prefix = `projects/${project.id}/`;
@@ -2446,6 +2492,11 @@ export default function WorkspacePage() {
                 setItems({ schemaVersion: 1, items: i });
                 const prefix = `projects/${project.id}/`;
                 await storage.writeFile(`${prefix}Items.json`, JSON.stringify({ schemaVersion: 1, items: i }));
+              }}
+              onUpdateWorldRules={async (r) => {
+                setWorldRules({ schemaVersion: 1, rules: r });
+                const prefix = `projects/${project.id}/`;
+                await storage.writeFile(`${prefix}WorldRules.json`, JSON.stringify({ schemaVersion: 1, rules: r }));
               }}
               onUpdateStyle={async (s) => {
                 setStyle(s);

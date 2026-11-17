@@ -1,13 +1,42 @@
 import { Action, ToolContext, CheckContinuityInput, ProposalResult, ReportItem } from '../types';
 import { buildPrompt } from '../prompts/buildPrompt';
 import { extractJson } from '../llm/parseJson';
-import { Character, Location } from '../../storage/schemas';
+import { Character, Location, Item, WorldRule } from '../../storage/schemas';
 import { stripBeatTokens } from '../beats';
 
 const SEVERITIES = ['high', 'medium', 'low'];
 
-async function readBibleContext(ctx: ToolContext): Promise<string> {
+function isRuleActiveForProse(rule: WorldRule, lowerProse: string): boolean {
+  if (rule.severity === 'hard' || rule.alwaysActive) return true;
+  if (rule.title && lowerProse.includes(rule.title.toLowerCase())) return true;
+  if (Array.isArray(rule.keywords)) {
+    return rule.keywords.some((kw) => kw.trim() && lowerProse.includes(kw.trim().toLowerCase()));
+  }
+  return false;
+}
+
+async function readBibleContext(ctx: ToolContext, lowerProse: string): Promise<string> {
   const parts: string[] = [];
+  try {
+    const r = await ctx.storage.readFile(`${ctx.prefix}WorldRules.json`);
+    if (r) {
+      const rules = (JSON.parse(r).rules || []) as WorldRule[];
+      const activeRules = rules.filter((rule) => isRuleActiveForProse(rule, lowerProse));
+      if (activeRules.length) {
+        parts.push(
+          'WORLD RULES:\n' +
+            activeRules
+              .map(
+                (rule) =>
+                  `- [${rule.severity === 'hard' ? 'HARD RULE' : 'SOFT RULE'}] ${rule.title} (${rule.category}): ${rule.statement}${rule.exceptions ? ` (Exceptions: ${rule.exceptions})` : ''}`
+              )
+              .join('\n')
+        );
+      }
+    }
+  } catch {
+    /* ignore */
+  }
   try {
     const c = await ctx.storage.readFile(`${ctx.prefix}Characters.json`);
     if (c) {
@@ -38,13 +67,32 @@ async function readBibleContext(ctx: ToolContext): Promise<string> {
   } catch {
     /* ignore */
   }
+  try {
+    const i = await ctx.storage.readFile(`${ctx.prefix}Items.json`);
+    if (i) {
+      const items = (JSON.parse(i).items || []) as Item[];
+      if (items.length) {
+        parts.push(
+          'ITEMS:\n' +
+            items
+              .map(
+                (x) =>
+                  `- ${x.name}${x.description ? `: ${x.description}` : ''}${x.significance ? ` — ${x.significance}` : ''}`
+              )
+              .join('\n')
+        );
+      }
+    }
+  } catch {
+    /* ignore */
+  }
   return parts.join('\n\n');
 }
 
 export const checkContinuity: Action<CheckContinuityInput> = {
   id: 'check_continuity',
   label: 'Check continuity',
-  description: 'Flag statements in the chapter that contradict the Story Bible.',
+  description: 'Flag statements in the chapter that contradict the Story Bible or World Rules.',
   level: 1,
   scope: 'chapter',
   allow: [], // Reports don't create side-effect write-ops
@@ -55,7 +103,7 @@ export const checkContinuity: Action<CheckContinuityInput> = {
       throw new Error('This chapter is empty — nothing to check.');
     }
 
-    const bible = await readBibleContext(ctx);
+    const bible = await readBibleContext(ctx, md.toLowerCase());
 
     // Resolve preceding chapter continuity
     const activeIdx = ctx.chapterOrder.indexOf(input.chapterId);

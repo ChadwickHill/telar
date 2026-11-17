@@ -14,6 +14,10 @@ import {
   SyncManifest,
   SyncManifestEntry,
   SyncManifestSchema,
+  WorldRule,
+  WorldRuleCategory,
+  WorldRulesSchema,
+  WorldRuleSeverity,
 } from './schemas';
 import { IndexedDBProjectStorage } from './IndexedDBProjectStorage';
 import { padOrder, parseFrontmatter, slugifyFilename, stringifyFrontmatter } from './frontmatter';
@@ -122,6 +126,16 @@ function asNumberOrUndefined(val: unknown): number | undefined {
     if (Number.isFinite(n)) return n;
   }
   return undefined;
+}
+
+function asBoolean(val: unknown, fallback: boolean): boolean {
+  if (typeof val === 'boolean') return val;
+  if (typeof val === 'string') {
+    const lower = val.trim().toLowerCase();
+    if (lower === 'true') return true;
+    if (lower === 'false') return false;
+  }
+  return fallback;
 }
 
 function parseMarkdownSections(body: string): Record<string, string> {
@@ -407,6 +421,72 @@ export function diskMdToItem(raw: string, existing?: Item, fallbackId?: string):
   };
 }
 
+export function worldRuleToDiskMd(rule: WorldRule): string {
+  const frontmatter: Record<string, unknown> = {
+    id: rule.id,
+    title: rule.title,
+    category: rule.category || 'other',
+    severity: rule.severity || 'hard',
+    alwaysActive: rule.alwaysActive ?? true,
+    keywords: rule.keywords || [],
+    ...(rule.color ? { color: rule.color } : {}),
+  };
+
+  const body = [
+    '## Statement',
+    '',
+    (rule.statement || '').trim(),
+    '',
+    '## Exceptions',
+    '',
+    (rule.exceptions || '').trim(),
+    '',
+  ].join('\n');
+
+  return stringifyFrontmatter(frontmatter, body);
+}
+
+export function diskMdToWorldRule(raw: string, existing?: WorldRule, fallbackId?: string): WorldRule {
+  const { data, body } = parseFrontmatter(raw);
+  const sections = parseMarkdownSections(body);
+
+  const validCategories: WorldRuleCategory[] = [
+    'orbital-propulsion',
+    'thermodynamics',
+    'comms-latency',
+    'biology-life-support',
+    'society-tech',
+    'other',
+  ];
+  const rawCategory = asString(data.category, existing?.category || 'other');
+  const category: WorldRuleCategory = validCategories.includes(rawCategory as WorldRuleCategory)
+    ? (rawCategory as WorldRuleCategory)
+    : 'other';
+
+  const rawSeverity = asString(data.severity, existing?.severity || 'hard');
+  const severity: WorldRuleSeverity = rawSeverity === 'soft' ? 'soft' : 'hard';
+
+  const statement =
+    sections['statement'] ??
+    (Object.keys(sections).length === 1 && sections['__preamble__']
+      ? sections['__preamble__']
+      : existing?.statement ?? '');
+  const exceptions = sections['exceptions'] ?? existing?.exceptions ?? '';
+
+  return {
+    id: asString(data.id, existing?.id || fallbackId || `rule-${Date.now()}`),
+    title: asString(data.title, existing?.title || 'Untitled World Rule'),
+    category,
+    severity,
+    statement: statement || '',
+    exceptions: exceptions || undefined,
+    alwaysActive: data.alwaysActive !== undefined ? asBoolean(data.alwaysActive, existing?.alwaysActive ?? true) : (existing?.alwaysActive ?? true),
+    keywords: data.keywords !== undefined ? asStringArray(data.keywords) : (existing?.keywords || []),
+    evidence: existing?.evidence || [],
+    color: data.color !== undefined ? (asString(data.color) || undefined) : existing?.color,
+  };
+}
+
 export function styleToDiskMd(style: Style): string {
   const frontmatter: Record<string, unknown> = {
     schemaVersion: 1,
@@ -630,6 +710,10 @@ function canonicalLocationHash(loc: Location): string {
 
 function canonicalItemHash(item: Item): string {
   return hashContent(itemToDiskMd(item));
+}
+
+function canonicalWorldRuleHash(rule: WorldRule): string {
+  return hashContent(worldRuleToDiskMd(rule));
 }
 
 function canonicalStyleHash(style: Style): string {
@@ -1052,6 +1136,19 @@ export class DiskFolderSync {
           await this.idbStore.writeFile(`${prefix}Items.json`, nextItemsJson);
           await writeDiskFile(handle, '.xnovelist/Items.json', nextItemsJson);
           changedIdbPaths.push('Items.json');
+        } else if (conflict.idbPath.startsWith('Bible/rule-')) {
+          const ruleId = conflict.idbPath.replace('Bible/rule-', '');
+          const rawRules = await this.idbStore.readFile(`${prefix}WorldRules.json`);
+          const parsedRules = rawRules ? WorldRulesSchema.parse(JSON.parse(rawRules)) : { schemaVersion: 1 as const, rules: [] };
+          const existing = parsedRules.rules.find((r) => r.id === ruleId);
+          const updatedRule = diskMdToWorldRule(conflict.diskContent, existing, ruleId);
+          const nextRules = existing
+            ? parsedRules.rules.map((r) => (r.id === ruleId ? updatedRule : r))
+            : [...parsedRules.rules, updatedRule];
+          const nextRulesJson = JSON.stringify({ schemaVersion: 1, rules: nextRules });
+          await this.idbStore.writeFile(`${prefix}WorldRules.json`, nextRulesJson);
+          await writeDiskFile(handle, '.xnovelist/WorldRules.json', nextRulesJson);
+          changedIdbPaths.push('WorldRules.json');
         } else if (conflict.idbPath === 'Style.json') {
           const rawStyle = await this.idbStore.readFile(`${prefix}Style.json`);
           const existingStyle = rawStyle ? StyleSchema.parse(JSON.parse(rawStyle)) : undefined;
@@ -1117,6 +1214,11 @@ export class DiskFolderSync {
       const itemId = idbPath.replace('Bible/item-', '');
       const parsed = diskMdToItem(content, undefined, itemId);
       return canonicalItemHash(parsed);
+    }
+    if (idbPath.startsWith('Bible/rule-')) {
+      const ruleId = idbPath.replace('Bible/rule-', '');
+      const parsed = diskMdToWorldRule(content, undefined, ruleId);
+      return canonicalWorldRuleHash(parsed);
     }
     if (idbPath === 'Style.json') {
       const parsed = diskMdToStyle(content);
@@ -1194,8 +1296,10 @@ export class DiskFolderSync {
       continuityBody[cid] = (await this.idbStore.readFile(p)) || '';
     }
 
-    // Optional forward-compatible files
     const worldRulesStr = await this.idbStore.readFile(`${prefix}WorldRules.json`);
+    const worldRules = worldRulesStr
+      ? WorldRulesSchema.parse(JSON.parse(worldRulesStr))
+      : { schemaVersion: 1 as const, rules: [] as WorldRule[] };
     const corkboardStr = await this.idbStore.readFile(`${prefix}Corkboard.json`);
 
     return {
@@ -1204,6 +1308,7 @@ export class DiskFolderSync {
       characters,
       locations,
       items,
+      worldRules,
       style,
       beatsStr,
       chaptersBody,
@@ -1401,6 +1506,26 @@ export class DiskFolderSync {
       pushedCount++;
     }
 
+    // World Rules
+    for (const rule of state.worldRules.rules) {
+      const diskPath = this.allocateUniquePath(
+        `story-bible/world-rules/${slugifyFilename(rule.title, rule.id)}.md`,
+        usedPaths,
+        rule.id
+      );
+      const md = worldRuleToDiskMd(rule);
+      const mtimeMs = await writeDiskFile(handle, diskPath, md);
+      const idbPath = `Bible/rule-${rule.id}`;
+      entries[idbPath] = {
+        idbPath,
+        diskPath,
+        baseHash: canonicalWorldRuleHash(rule),
+        baseIdbUpdatedAt: now,
+        baseDiskMtimeMs: mtimeMs,
+      };
+      pushedCount++;
+    }
+
     // Style
     {
       const diskPath = 'story-bible/style.md';
@@ -1421,12 +1546,10 @@ export class DiskFolderSync {
     await writeDiskFile(handle, '.xnovelist/Characters.json', JSON.stringify(state.characters, null, 2));
     await writeDiskFile(handle, '.xnovelist/Locations.json', JSON.stringify(state.locations, null, 2));
     await writeDiskFile(handle, '.xnovelist/Items.json', JSON.stringify(state.items, null, 2));
+    await writeDiskFile(handle, '.xnovelist/WorldRules.json', JSON.stringify(state.worldRules, null, 2));
     await writeDiskFile(handle, '.xnovelist/Style.json', JSON.stringify(state.style, null, 2));
     if (state.beatsStr) {
       await writeDiskFile(handle, '.xnovelist/Beats.json', state.beatsStr);
-    }
-    if (state.worldRulesStr) {
-      await writeDiskFile(handle, '.xnovelist/WorldRules.json', state.worldRulesStr);
     }
     if (state.corkboardStr) {
       const corkMtime = await writeDiskFile(handle, '.xnovelist/Corkboard.json', formatCorkboardForDisk(state.corkboardStr));
@@ -1690,16 +1813,39 @@ export class DiskFolderSync {
     await this.idbStore.writeFile(`${prefix}Style.json`, JSON.stringify(nextStyle));
     pulledPaths.push('Style.json');
 
-    // 9. Beats / WorldRules / Corkboard sidecars if present
+    // 8b. World Rules (merge .xnovelist/WorldRules.json + story-bible/world-rules/*.md)
+    const diskWorldRulesJson = await readDiskFile(handle, '.xnovelist/WorldRules.json');
+    const baseWorldRules = diskWorldRulesJson
+      ? WorldRulesSchema.parse(JSON.parse(diskWorldRulesJson.content)).rules
+      : [];
+    const ruleById = new Map<string, WorldRule>(baseWorldRules.map((r) => [r.id, r]));
+    const diskRuleFiles = await listDiskMarkdownFiles(handle, 'story-bible/world-rules');
+    for (const diskPath of diskRuleFiles) {
+      const fileData = await readDiskFile(handle, diskPath);
+      if (!fileData) continue;
+      const slug = diskPath.split('/').pop()!.replace(/\.md$/i, '');
+      const parsedMeta = parseFrontmatter(fileData.content).data;
+      const ruleId = asString(parsedMeta.id, `rule-${slug}`);
+      const existing = ruleById.get(ruleId);
+      const merged = diskMdToWorldRule(fileData.content, existing, ruleId);
+      ruleById.set(merged.id, merged);
+      entries[`Bible/rule-${merged.id}`] = {
+        idbPath: `Bible/rule-${merged.id}`,
+        diskPath,
+        baseHash: canonicalWorldRuleHash(merged),
+        baseIdbUpdatedAt: now,
+        baseDiskMtimeMs: fileData.mtimeMs,
+      };
+    }
+    const nextWorldRules = { schemaVersion: 1 as const, rules: Array.from(ruleById.values()) };
+    await this.idbStore.writeFile(`${prefix}WorldRules.json`, JSON.stringify(nextWorldRules));
+    pulledPaths.push('WorldRules.json');
+
+    // 9. Beats / Corkboard sidecars if present
     const diskBeats = await readDiskFile(handle, '.xnovelist/Beats.json');
     if (diskBeats) {
       await this.idbStore.writeFile(`${prefix}Beats.json`, diskBeats.content);
       pulledPaths.push('Beats.json');
-    }
-    const diskWorldRules = await readDiskFile(handle, '.xnovelist/WorldRules.json');
-    if (diskWorldRules) {
-      await this.idbStore.writeFile(`${prefix}WorldRules.json`, diskWorldRules.content);
-      pulledPaths.push('WorldRules.json');
     }
     const diskCorkboard = await readDiskFile(handle, '.xnovelist/Corkboard.json');
     if (diskCorkboard) {
@@ -1808,6 +1954,15 @@ export class DiskFolderSync {
         diskItemsById.set(id, { diskPath: dp, content: f.content, mtimeMs: f.mtimeMs });
       }
 
+      const diskRulesById = new Map<string, { diskPath: string; content: string; mtimeMs: number }>();
+      for (const dp of await listDiskMarkdownFiles(handle, 'story-bible/world-rules')) {
+        const f = await readDiskFile(handle, dp);
+        if (!f) continue;
+        const fm = parseFrontmatter(f.content).data;
+        const id = asString(fm.id, `rule-${dp.split('/').pop()!.replace(/\.md$/i, '')}`);
+        diskRulesById.set(id, { diskPath: dp, content: f.content, mtimeMs: f.mtimeMs });
+      }
+
       // Mutable copies of IDB state for any pulled updates
       const nextProject = { ...state.project, chapters: [...(state.project.chapters || [])], chapterOrder: [...state.project.chapterOrder] };
       let projectJsonChanged = false;
@@ -1817,6 +1972,8 @@ export class DiskFolderSync {
       let locationsChanged = false;
       const nextItems = [...state.items.items];
       let itemsChanged = false;
+      const nextWorldRules = [...state.worldRules.rules];
+      let worldRulesChanged = false;
       let nextStyle = state.style;
       let styleChanged = false;
 
@@ -2550,6 +2707,124 @@ export class DiskFolderSync {
         }
       }
 
+      // ---- 5b. Reconcile World Rules ---------------------------------------
+      const idbRuleIds = new Set(nextWorldRules.map((r) => r.id));
+      for (let i = 0; i < nextWorldRules.length; i++) {
+        const rule = nextWorldRules[i];
+        const idbPath = `Bible/rule-${rule.id}`;
+        const iHash = canonicalWorldRuleHash(rule);
+        const baseEntry = manifest.entries[idbPath];
+        const diskMatch = diskRulesById.get(rule.id);
+        const desiredDiskPath = this.allocateUniquePath(
+          `story-bible/world-rules/${slugifyFilename(rule.title, rule.id)}.md`,
+          usedPaths,
+          rule.id
+        );
+
+        if (!diskMatch) {
+          if (baseEntry && iHash === baseEntry.baseHash) {
+            nextWorldRules.splice(i, 1);
+            i--;
+            worldRulesChanged = true;
+            delete nextEntries[idbPath];
+            pulledPaths.push('WorldRules.json');
+            deletedCount++;
+          } else {
+            const md = worldRuleToDiskMd(rule);
+            const mtimeMs = await writeDiskFile(handle, desiredDiskPath, md);
+            nextEntries[idbPath] = {
+              idbPath,
+              diskPath: desiredDiskPath,
+              baseHash: iHash,
+              baseIdbUpdatedAt: now,
+              baseDiskMtimeMs: mtimeMs,
+            };
+            pushedCount++;
+          }
+        } else {
+          const parsedDiskRule = diskMdToWorldRule(diskMatch.content, rule, rule.id);
+          const dHash = canonicalWorldRuleHash(parsedDiskRule);
+          const baseHash = baseEntry?.baseHash;
+          const idbChanged = !baseHash || iHash !== baseHash;
+          const diskChanged = !baseHash || dHash !== baseHash;
+
+          if (iHash === dHash) {
+            if (diskMatch.diskPath !== desiredDiskPath) {
+              const md = worldRuleToDiskMd(rule);
+              const mtimeMs = await writeDiskFile(handle, desiredDiskPath, md);
+              await deleteDiskFile(handle, diskMatch.diskPath);
+              nextEntries[idbPath] = {
+                idbPath,
+                diskPath: desiredDiskPath,
+                baseHash: iHash,
+                baseIdbUpdatedAt: now,
+                baseDiskMtimeMs: mtimeMs,
+              };
+            }
+          } else if (idbChanged && !diskChanged) {
+            if (diskMatch.diskPath !== desiredDiskPath) {
+              await deleteDiskFile(handle, diskMatch.diskPath);
+            }
+            const md = worldRuleToDiskMd(rule);
+            const mtimeMs = await writeDiskFile(handle, desiredDiskPath, md);
+            nextEntries[idbPath] = {
+              idbPath,
+              diskPath: desiredDiskPath,
+              baseHash: iHash,
+              baseIdbUpdatedAt: now,
+              baseDiskMtimeMs: mtimeMs,
+            };
+            pushedCount++;
+          } else if (!idbChanged && diskChanged) {
+            nextWorldRules[i] = parsedDiskRule;
+            worldRulesChanged = true;
+            nextEntries[idbPath] = {
+              idbPath,
+              diskPath: diskMatch.diskPath,
+              baseHash: dHash,
+              baseIdbUpdatedAt: now,
+              baseDiskMtimeMs: diskMatch.mtimeMs,
+            };
+            pulledPaths.push('WorldRules.json');
+          } else {
+            conflicts.push({
+              idbPath,
+              diskPath: diskMatch.diskPath,
+              label: `World Rule: ${rule.title}`,
+              idbContent: worldRuleToDiskMd(rule),
+              diskContent: diskMatch.content,
+              idbUpdatedAt: now,
+              diskMtimeMs: diskMatch.mtimeMs,
+            });
+          }
+        }
+      }
+
+      for (const [ruleId, diskMatch] of diskRulesById.entries()) {
+        if (idbRuleIds.has(ruleId)) continue;
+        const idbPath = `Bible/rule-${ruleId}`;
+        const parsed = diskMdToWorldRule(diskMatch.content, undefined, ruleId);
+        const dHash = canonicalWorldRuleHash(parsed);
+        const baseEntry = manifest.entries[idbPath];
+
+        if (baseEntry && dHash === baseEntry.baseHash) {
+          await deleteDiskFile(handle, diskMatch.diskPath);
+          delete nextEntries[idbPath];
+          deletedCount++;
+        } else {
+          nextWorldRules.push(parsed);
+          worldRulesChanged = true;
+          nextEntries[idbPath] = {
+            idbPath,
+            diskPath: diskMatch.diskPath,
+            baseHash: dHash,
+            baseIdbUpdatedAt: now,
+            baseDiskMtimeMs: diskMatch.mtimeMs,
+          };
+          pulledPaths.push('WorldRules.json');
+        }
+      }
+
       // ---- 6. Reconcile Style Profile --------------------------------------
       {
         const idbPath = 'Style.json';
@@ -2644,6 +2919,12 @@ export class DiskFolderSync {
           JSON.stringify({ schemaVersion: 1, items: nextItems })
         );
       }
+      if (worldRulesChanged) {
+        await this.idbStore.writeFile(
+          `${state.prefix}WorldRules.json`,
+          JSON.stringify({ schemaVersion: 1, rules: nextWorldRules })
+        );
+      }
       if (styleChanged) {
         await this.idbStore.writeFile(`${state.prefix}Style.json`, JSON.stringify(nextStyle));
       }
@@ -2665,13 +2946,15 @@ export class DiskFolderSync {
         '.xnovelist/Items.json',
         JSON.stringify({ schemaVersion: 1, items: nextItems }, null, 2)
       );
+      await writeDiskFile(
+        handle,
+        '.xnovelist/WorldRules.json',
+        JSON.stringify({ schemaVersion: 1, rules: nextWorldRules }, null, 2)
+      );
       await writeDiskFile(handle, '.xnovelist/Style.json', JSON.stringify(nextStyle, null, 2));
 
       if (state.beatsStr) {
         await writeDiskFile(handle, '.xnovelist/Beats.json', state.beatsStr);
-      }
-      if (state.worldRulesStr) {
-        await writeDiskFile(handle, '.xnovelist/WorldRules.json', state.worldRulesStr);
       }
 
       // ---- 8. Reconcile Corkboard (.xnovelist/Corkboard.json) ----------------

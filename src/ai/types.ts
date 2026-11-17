@@ -1,5 +1,5 @@
 import { ProjectStorage } from '../storage/ProjectStorage';
-import { Project, Character, Location, Style } from '../storage/schemas';
+import { Project, Character, Location, Style, WorldRule } from '../storage/schemas';
 import { WorkspaceAIConfig } from '../storage/aiConfig';
 
 /** A single chat round-trip, provider-agnostic (one wire format). */
@@ -48,6 +48,7 @@ export interface ToolContext {
   // React state synchronization callbacks
   onUpdateCharacters?: (list: Character[]) => void;
   onUpdateLocations?: (list: Location[]) => void;
+  onUpdateWorldRules?: (list: WorldRule[]) => void;
   onUpdateStyle?: (style: Style) => void;
   /** Called after every continuity write; the page derives the synopsis cache from the new content. */
   onUpdateContinuity?: (chapterId: string, content: string) => Promise<void>;
@@ -167,6 +168,7 @@ export interface CaptureInput {
 
 export type CharacterDraft = Partial<Character> & { name: string };
 export type LocationDraft = Partial<Location> & { name: string };
+export type WorldRuleDraft = Partial<WorldRule> & { title: string };
 export type StyleFieldDelta = { path: string; label: string; value: string };
 
 export interface SummarizeChapterInput {

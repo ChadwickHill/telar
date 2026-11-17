@@ -342,7 +342,29 @@
   "corkboardJumpTo": "Jump to",
   "corkboardEmptyTitle": "Your spatial brainstorming board is empty",
   "corkboardEmptyDesc": "Add Idea, Scene, Character, Location, World Rule, or Plot Thread cards above, drag to arrange, and connect plot threads visually.",
-  "corkboardPromotedToast": "Promoted card to"
+  "corkboardPromotedToast": "Promoted card to",
+  "worldRules": "World Rules",
+  "worldRulesTitle": "World Rules & Physics",
+  "noWorldRulesYet": "No world rules yet. Add physical laws, tech limits, or constraints to keep prose consistent.",
+  "worldRuleTitlePlaceholder": "Rule title...",
+  "worldRuleCategory": "Category",
+  "worldRuleCatOrbital": "Orbital & Propulsion",
+  "worldRuleCatThermodynamics": "Thermodynamics",
+  "worldRuleCatCommsLatency": "Comms & Latency",
+  "worldRuleCatBiology": "Biology & Life Support",
+  "worldRuleCatSociety": "Society & Tech",
+  "worldRuleCatOther": "Other",
+  "worldRuleSeverity": "Severity",
+  "worldRuleSeverityHard": "Hard Law",
+  "worldRuleSeveritySoft": "Soft Guideline",
+  "worldRuleAlwaysActive": "Always active in every scene",
+  "worldRuleAlwaysActiveHint": "Injected into drafting & audit prompts even when keywords aren't mentioned.",
+  "worldRuleKeywords": "Trigger Keywords (comma separated)",
+  "worldRuleKeywordsPlaceholder": "e.g. epstein, torchship, light-lag, radiator",
+  "worldRuleStatement": "Rule Statement & Physical Constraint",
+  "worldRuleStatementPlaceholder": "State the invariant clearly (e.g. 'No FTL communications; Earth-Ceres one-way lag is 15-28 minutes.')",
+  "worldRuleExceptions": "Exceptions / Edge Cases (Optional)",
+  "worldRuleExceptionsPlaceholder": "Any narrow exceptions, failure modes, or special cases...",
+  "worldRuleEvidence": "Manuscript Evidence",
+  "worldRuleAuditBtn": "Audit World Rules"
 }
-
-

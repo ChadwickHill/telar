@@ -3,7 +3,7 @@ import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { Markdown } from 'tiptap-markdown';
 import { useTranslation } from '../i18n/useTranslation';
-import { TypographySettings, Character, Location, Item } from '../storage/schemas';
+import { TypographySettings, Character, Location, Item, WorldRule } from '../storage/schemas';
 import FormatToolbar from './FormatToolbar';
 import { SearchAndReplace } from './SearchAndReplace';
 import FindBar from './FindBar';
@@ -43,15 +43,17 @@ interface EditorCanvasProps {
   characters?: Character[];
   locations?: Location[];
   items?: Item[];
+  worldRules?: WorldRule[];
   highlightBibleRefs?: boolean;
   onToggleHighlightBibleRefs?: () => void;
-  onAttachEvidence?: (entityType: 'characters' | 'locations' | 'items', entityId: string, quote: string) => void;
+  onAttachEvidence?: (entityType: 'characters' | 'locations' | 'items' | 'rules', entityId: string, quote: string) => void;
   aiLevel?: number;
   isAIPanelOpen?: boolean;
   onToggleAIPanel?: () => void;
   onOpenBibleCharacter?: (charId: string) => void;
   onOpenBibleLocation?: (locId: string) => void;
   onOpenBibleItem?: (itemId: string) => void;
+  onOpenBibleRule?: (ruleId: string) => void;
   onSelectionChange?: (sel: { from: number; to: number; text: string; textBefore: string; textAfter: string } | null) => void;
   onBeatClick?: (beatId: string | null) => void;
   onBeatCreated?: (beatId: string) => void;
@@ -90,6 +92,7 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
   characters = [],
   locations = [],
   items = [],
+  worldRules = [],
   highlightBibleRefs = true,
   onToggleHighlightBibleRefs,
   onAttachEvidence,
@@ -99,6 +102,7 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
   onOpenBibleCharacter,
   onOpenBibleLocation,
   onOpenBibleItem,
+  onOpenBibleRule,
   onSelectionChange,
   onBeatClick,
   onBeatCreated,
@@ -148,15 +152,15 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
   const [contextMenuPosition, setContextMenuPosition] = useState({ x: 0, y: 0 });
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
-  // Character/Location/Item card popup states
-  // Heterogeneous bible entity (character/location/item) rendered dynamically in the card.
+  // Character/Location/Item/Rule card popup states
+  // Heterogeneous bible entity rendered dynamically in the card.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [clickedEntity, setClickedEntity] = useState<{ type: 'character' | 'location' | 'item'; data: any } | null>(null);
+  const [clickedEntity, setClickedEntity] = useState<{ type: 'character' | 'location' | 'item' | 'rule'; data: any } | null>(null);
   const [characterCardPosition, setCharacterCardPosition] = useState({ x: 0, y: 0 });
   const [isCharacterCardOpen, setIsCharacterCardOpen] = useState(false);
   const characterCardRef = useRef<HTMLDivElement>(null);
 
-  const handleHighlightClickRef = useRef<((type: 'character' | 'location' | 'item', aliasText: string, event: MouseEvent) => void) | null>(null);
+  const handleHighlightClickRef = useRef<((type: 'character' | 'location' | 'item' | 'rule', aliasText: string, event: MouseEvent) => void) | null>(null);
   useEffect(() => {
     handleHighlightClickRef.current = (type, aliasText, event) => {
       const cleanText = aliasText.trim().toLowerCase();
@@ -179,6 +183,12 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
           const nameMatch = item.name && item.name.trim().toLowerCase() === cleanText;
           const aliasMatch = Array.isArray(item.aliases) && item.aliases.some((alias: string) => alias && alias.trim().toLowerCase() === cleanText);
           return nameMatch || aliasMatch;
+        });
+      } else if (type === 'rule' && worldRules) {
+        match = worldRules.find(rule => {
+          const titleMatch = rule.title && rule.title.trim().toLowerCase() === cleanText;
+          const kwMatch = Array.isArray(rule.keywords) && rule.keywords.some((kw: string) => kw && kw.trim().toLowerCase() === cleanText);
+          return titleMatch || kwMatch;
         });
       }
 
@@ -208,7 +218,7 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
         setIsCharacterCardOpen(true);
       }
     };
-  }, [characters, locations, items]);
+  }, [characters, locations, items, worldRules]);
   
   const [toast, setToast] = useState<string | null>(null);
 
@@ -220,15 +230,17 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
   const onAttachEvidenceRef = useRef(onAttachEvidence);
   useEffect(() => { onAttachEvidenceRef.current = onAttachEvidence; }, [onAttachEvidence]);
 
-  const handleConfirmAttach = (type: 'characters' | 'locations' | 'items', id: string) => {
+  const handleConfirmAttach = (type: 'characters' | 'locations' | 'items' | 'rules', id: string) => {
     if (onAttachEvidenceRef.current && selectedEvidenceText.trim()) {
       onAttachEvidenceRef.current(type, id, selectedEvidenceText.trim());
       const name = type === 'characters'
         ? (characters || []).find(c => c.id === id)?.name
         : type === 'locations'
           ? (locations || []).find(l => l.id === id)?.name
-          : (items || []).find(i => i.id === id)?.name;
-      showToast(`Attached to ${name || 'item'} successfully!`);
+          : type === 'items'
+            ? (items || []).find(i => i.id === id)?.name
+            : (worldRules || []).find(r => r.id === id)?.title;
+      showToast(`Attached to ${name || 'entry'} successfully!`);
     }
   };
 
@@ -443,6 +455,7 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
         characters: characters || [],
         locations: locations || [],
         items: items || [],
+        worldRules: worldRules || [],
         enabled: !!highlightBibleRefs,
       }),
       BeatAnchor.configure({
@@ -498,6 +511,7 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
           const charHighlight = target.closest('.character-highlight');
           const locHighlight = target.closest('.location-highlight');
           const itemHighlight = target.closest('.item-highlight');
+          const ruleHighlight = target.closest('.rule-highlight');
           if (charHighlight) {
             const aliasText = charHighlight.textContent || '';
             handleHighlightClickRef.current?.('character', aliasText, event);
@@ -511,6 +525,11 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
           if (itemHighlight) {
             const aliasText = itemHighlight.textContent || '';
             handleHighlightClickRef.current?.('item', aliasText, event);
+            return true;
+          }
+          if (ruleHighlight) {
+            const aliasText = ruleHighlight.textContent || '';
+            handleHighlightClickRef.current?.('rule', aliasText, event);
             return true;
           }
           return false;
@@ -919,17 +938,18 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [editor, wordCount, onToggleDistractionFree, isFindBarOpen, isEvidenceDialogOpen, isContextMenuOpen, handleCloseFindBar]);
 
-  // Sync BibleLinkage extension state with updates to characters, locations, items, and settings
+  // Sync BibleLinkage extension state with updates to characters, locations, items, worldRules, and settings
   useEffect(() => {
     if (editor && !editor.isDestroyed) {
       editor.commands.updateBibleLinkage({
         characters: characters || [],
         locations: locations || [],
         items: items || [],
+        worldRules: worldRules || [],
         enabled: !!highlightBibleRefs,
       });
     }
-  }, [editor, characters, locations, items, highlightBibleRefs]);
+  }, [editor, characters, locations, items, worldRules, highlightBibleRefs]);
 
   // Dismiss context menu on click outside
   useEffect(() => {
@@ -960,7 +980,8 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
         if (
           target.closest('.character-highlight') ||
           target.closest('.location-highlight') ||
-          target.closest('.item-highlight')
+          target.closest('.item-highlight') ||
+          target.closest('.rule-highlight')
         ) {
           return;
         }
@@ -1251,6 +1272,24 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
                 ))}
               </>
             )}
+
+            {(worldRules || []).length > 0 && (
+              <>
+                <div className="px-3 py-1 font-semibold opacity-40 uppercase tracking-wider text-[9px] mt-2">World Rules</div>
+                {(worldRules || []).map(rule => (
+                  <button
+                    key={rule.id}
+                    onClick={() => {
+                      handleConfirmAttach('rules', rule.id);
+                      setIsContextMenuOpen(false);
+                    }}
+                    className="w-full text-left px-4 py-1.5 hover:bg-[var(--border)] hover:text-[var(--foreground)] cursor-pointer truncate"
+                  >
+                    {rule.title}
+                  </button>
+                ))}
+              </>
+            )}
           </div>
         </div>
       )}
@@ -1282,13 +1321,15 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
                       onOpenBibleLocation(id);
                     } else if (clickedEntity.type === 'item' && onOpenBibleItem) {
                       onOpenBibleItem(id);
+                    } else if (clickedEntity.type === 'rule' && onOpenBibleRule) {
+                      onOpenBibleRule(id);
                     }
                     setIsCharacterCardOpen(false);
                   }}
                   className="text-xs font-extrabold uppercase tracking-widest text-[var(--accent)] hover:underline cursor-pointer text-left block bg-transparent border-none p-0 focus:outline-none"
                   title="Open in Story Bible"
                 >
-                  {clickedEntity.data.name}
+                  {clickedEntity.type === 'rule' ? clickedEntity.data.title : clickedEntity.data.name}
                 </button>
                 {clickedEntity.type === 'character' && clickedEntity.data.role && (
                   <span className="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wider font-semibold block mt-0.5">
@@ -1303,6 +1344,11 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
                 {clickedEntity.type === 'item' && (
                   <span className="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wider font-semibold block mt-0.5">
                     Object/Item
+                  </span>
+                )}
+                {clickedEntity.type === 'rule' && (
+                  <span className="text-[10px] text-gray-500 dark:text-gray-400 uppercase tracking-wider font-semibold block mt-0.5">
+                    {String(clickedEntity.data.severity || 'hard').toUpperCase()} RULE · {clickedEntity.data.category}
                   </span>
                 )}
               </div>
@@ -1402,6 +1448,30 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
               </>
             )}
 
+            {/* World Rule specific */}
+            {clickedEntity.type === 'rule' && (
+              <>
+                {clickedEntity.data.statement && (
+                  <div>
+                    <span className="font-extrabold block text-[8px] opacity-50 uppercase tracking-widest">Rule Statement</span>
+                    <p className="opacity-90 leading-relaxed">{clickedEntity.data.statement}</p>
+                  </div>
+                )}
+                {clickedEntity.data.exceptions && (
+                  <div>
+                    <span className="font-extrabold block text-[8px] opacity-50 uppercase tracking-widest">Exceptions</span>
+                    <p className="opacity-90 leading-relaxed">{clickedEntity.data.exceptions}</p>
+                  </div>
+                )}
+                {Array.isArray(clickedEntity.data.keywords) && clickedEntity.data.keywords.length > 0 && (
+                  <div>
+                    <span className="font-extrabold block text-[8px] opacity-50 uppercase tracking-widest">Keywords</span>
+                    <p className="opacity-90 font-mono text-[10px]">{clickedEntity.data.keywords.join(', ')}</p>
+                  </div>
+                )}
+              </>
+            )}
+
             {/* Common Notes */}
             {clickedEntity.data.notes && (
               <div className="border-t border-[var(--border)]/20 pt-2">
@@ -1433,6 +1503,12 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
             name: i.name,
             type: 'items' as const,
             subtitle: i.description || '',
+          })),
+          ...(worldRules || []).map(r => ({
+            id: r.id,
+            name: r.title,
+            type: 'rules' as const,
+            subtitle: r.statement || '',
           }))
         ];
         const filteredItems = allBibleItems.filter(item => 
@@ -1461,7 +1537,7 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
               {/* Search Input for Bible items */}
               <input
                 type="text"
-                placeholder="Filter characters, locations, or items..."
+                placeholder="Filter characters, locations, items, or world rules..."
                 value={pickerSearchQuery}
                 onChange={(e) => setPickerSearchQuery(e.target.value)}
                 className="w-full px-3 py-2 bg-[var(--editor-bg)] border border-[var(--border)] focus:outline-none text-xs rounded-none mb-3"
@@ -1487,9 +1563,9 @@ const EditorCanvas = React.forwardRef<EditorCanvasRef, EditorCanvasProps>(functi
                       <span className="text-xs font-semibold text-[var(--foreground)]">{item.name}</span>
                       <span className="text-[10px] opacity-60 flex items-center gap-2">
                         <span className="uppercase tracking-wider font-bold text-[8px]">
-                          {item.type === 'characters' ? 'Character' : item.type === 'locations' ? 'Location' : 'Item'}
+                          {item.type === 'characters' ? 'Character' : item.type === 'locations' ? 'Location' : item.type === 'items' ? 'Item' : 'World Rule'}
                         </span>
-                        {item.subtitle && <span>• {item.subtitle}</span>}
+                        {item.subtitle && <span className="truncate">• {item.subtitle}</span>}
                       </span>
                     </button>
                   ))
